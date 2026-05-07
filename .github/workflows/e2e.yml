@@ -79,6 +79,15 @@ jobs:
             const fs = require('fs');
             let body = '## 🎭 E2E Test Results\n\n';
             try {
+              if (!fs.existsSync('frontend/playwright-results.json')) {
+                body += '> ⚠️ **Tests did not run** — check earlier steps (build or preview server likely failed).\n';
+                body += `> [View run logs](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})`;
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: context.issue.number, body,
+                });
+                return;
+              }
               const results = JSON.parse(fs.readFileSync('frontend/playwright-results.json', 'utf8'));
               const { suites } = results;
               let passed = 0, failed = 0, skipped = 0;
