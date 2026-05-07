@@ -35,12 +35,15 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --no-install-project
 
       - name: Run pytest with coverage
         id: run
         # continue-on-error so the review job still runs even when tests fail
         continue-on-error: true
+        env:
+          # Ensure backend package is importable without pip install
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           uv run pytest tests/ \
             --tb=short \
@@ -93,11 +96,13 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --no-install-project
 
       - name: Run ruff (lint + format check)
         id: ruff
         continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           uv run ruff check backend/ azure-functions/ scripts/ \
             --output-format=github \
