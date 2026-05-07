@@ -285,12 +285,33 @@ def main() -> None:
     prompt = build_prompt(diff, gate_summary)
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    review_text = message.content[0].text
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        review_text = message.content[0].text
+    except anthropic.BadRequestError as exc:
+        if "credit balance is too low" in str(exc):
+            notice = (
+                gate_summary
+                + "\n\n> ⚠️ **Claude AI Review skipped** — Anthropic account has insufficient credits. "
+                "Add credits at [console.anthropic.com](https://console.anthropic.com) → Plans & Billing."
+            )
+            post_review(notice, "comment")
+            print(f"Skipped Claude review — no credits: {exc}")
+            return
+        raise
+    except anthropic.AuthenticationError as exc:
+        notice = (
+            gate_summary
+            + "\n\n> ⚠️ **Claude AI Review skipped** — Invalid `ANTHROPIC_API_KEY` secret. "
+            f"Error: `{exc}`"
+        )
+        post_review(notice, "comment")
+        print(f"Skipped Claude review — auth error: {exc}")
+        return
 
     # Parse decision from Claude's response
     decision = "comment"
