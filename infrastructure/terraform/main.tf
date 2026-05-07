@@ -121,11 +121,20 @@ resource "azurerm_key_vault" "main" {
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = "standard"
 
+  # CI/CD service principal — can set secrets during terraform apply
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
     object_id = data.azurerm_client_config.current.object_id
 
     secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
+  }
+
+  # AKS kubelet identity — CSI driver reads secrets into pods at runtime
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = module.aks.kubelet_object_id
+
+    secret_permissions = ["Get", "List"]
   }
 
   tags = var.tags
@@ -155,6 +164,24 @@ resource "azurerm_key_vault_secret" "search_key" {
 resource "azurerm_key_vault_secret" "openai_key" {
   name         = "openai-api-key"
   value        = module.openai.primary_key
+  key_vault_id = azurerm_key_vault.main.id
+}
+
+resource "azurerm_key_vault_secret" "openai_endpoint" {
+  name         = "openai-endpoint"
+  value        = module.openai.endpoint
+  key_vault_id = azurerm_key_vault.main.id
+}
+
+resource "azurerm_key_vault_secret" "search_endpoint" {
+  name         = "search-endpoint"
+  value        = module.search.endpoint
+  key_vault_id = azurerm_key_vault.main.id
+}
+
+resource "azurerm_key_vault_secret" "cosmos_gremlin_key" {
+  name         = "cosmos-gremlin-key"
+  value        = module.cosmos.gremlin_key
   key_vault_id = azurerm_key_vault.main.id
 }
 

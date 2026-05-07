@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "plan or apply"
+        description: "Action to run"
         required: true
         default: "plan"
         type: choice
@@ -16,10 +16,18 @@ jobs:
   terraform:
     name: Terraform ${{ github.event.inputs.action || 'plan' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     defaults:
       run:
         working-directory: infrastructure/terraform
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -28,48 +36,92 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
+          # Wrap outputs so we can parse them after apply
+          terraform_wrapper: true
 
       - name: Log in to Azure
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      # ── Init → Validate → Plan (runs on every PR and workflow dispatch) ───────
+
       - name: Terraform Init
         run: terraform init
-        env:
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
 
       - name: Terraform Validate
         run: terraform validate
 
       - name: Terraform Plan
+        id: plan
         run: terraform plan -out=tfplan
-        env:
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      # ── Apply (only when action == apply) ─────────────────────────────────────
 
       - name: Terraform Apply
+        id: apply
         if: github.event.inputs.action == 'apply'
         run: terraform apply -auto-approve tfplan
-        env:
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
 
-      # Export .env from Terraform outputs after successful apply
-      - name: Export environment file
+      # ── After apply: extract outputs and push to GitHub Secrets ───────────────
+      # This means the deploy workflow always has up-to-date resource names
+      # without anyone needing to manually copy-paste them into GitHub Settings.
+
+      - name: Extract Terraform outputs
+        id: tf_outputs
         if: github.event.inputs.action == 'apply'
         run: |
-          terraform output -raw env_file_content > ../../.env.generated
-          echo "Environment file written to .env.generated"
+          echo "acr_login_server=$(terraform output -raw acr_login_server 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "aks_cluster_name=$(terraform output -raw aks_cluster_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "resource_group_name=$(terraform output -raw resource_group_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "key_vault_uri=$(terraform output -raw key_vault_uri 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "app_insights_cs=$(terraform output -raw app_insights_connection_string 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+
+      - name: Push infrastructure outputs back to GitHub Secrets
+        if: github.event.inputs.action == 'apply' && steps.tf_outputs.outputs.acr_login_server != ''
         env:
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          REPO="${{ github.repository }}"
+
+          # Resource identifiers (not sensitive — needed by deploy workflow)
+          gh secret set ACR_LOGIN_SERVER     --body "${{ steps.tf_outputs.outputs.acr_login_server }}"     --repo "$REPO"
+          gh secret set AKS_CLUSTER_NAME    --body "${{ steps.tf_outputs.outputs.aks_cluster_name }}"    --repo "$REPO"
+          gh secret set AKS_RESOURCE_GROUP  --body "${{ steps.tf_outputs.outputs.resource_group_name }}" --repo "$REPO"
+          gh secret set KEY_VAULT_URI        --body "${{ steps.tf_outputs.outputs.key_vault_uri }}"        --repo "$REPO"
+
+          echo "GitHub Secrets updated from Terraform outputs"
+
+      # ── Generate SecretProviderClass with Key Vault name baked in ─────────────
+      # Pods use this to mount secrets directly from Key Vault without storing
+      # them in Kubernetes etcd.
+
+      - name: Generate SecretProviderClass manifest
+        if: github.event.inputs.action == 'apply'
+        working-directory: ${{ github.workspace }}
+        run: |
+          KV_NAME=$(echo "${{ steps.tf_outputs.outputs.key_vault_uri }}" | sed 's|https://||;s|.vault.azure.net/||')
+          TENANT_ID="${{ secrets.ARM_TENANT_ID }}"
+
+          sed \
+            -e "s|KEY_VAULT_NAME_PLACEHOLDER|${KV_NAME}|g" \
+            -e "s|TENANT_ID_PLACEHOLDER|${TENANT_ID}|g" \
+            infrastructure/kubernetes/secret-provider-class.yaml.tpl \
+            > infrastructure/kubernetes/secret-provider-class.yaml
+
+          echo "Generated secret-provider-class.yaml for Key Vault: ${KV_NAME}"
+          cat infrastructure/kubernetes/secret-provider-class.yaml
+
+      - name: Upload SecretProviderClass as artifact
+        if: github.event.inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-manifests
+          path: infrastructure/kubernetes/secret-provider-class.yaml
+          retention-days: 7
+
+      # ── Destroy (only when action == destroy) ─────────────────────────────────
+
+      - name: Terraform Destroy
+        if: github.event.inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
