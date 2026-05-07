@@ -1,4 +1,4 @@
-﻿"""
+"""
 kb-rag RAG Backend — FastAPI entry point.
 
 Starts the web server and registers all route groups:

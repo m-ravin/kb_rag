@@ -1,4 +1,4 @@
-﻿import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LayoutDashboard, FileText, MessageSquare, LogOut } from "lucide-react";
 import clsx from "clsx";
 

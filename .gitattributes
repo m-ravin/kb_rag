@@ -1,0 +1,24 @@
+# Normalize all text files to LF in the repository.
+# This prevents Windows tools from introducing CRLF or BOM characters
+# that break TOML parsers, YAML parsers, and shell scripts on Linux CI.
+
+* text=auto eol=lf
+
+# Explicitly LF for files parsed by strict parsers
+*.toml  text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.md    text eol=lf
+
+# Binary — never touch line endings
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary

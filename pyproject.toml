@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "kb_rag"
 version = "1.0.0"
 description = "KB RAG — General-purpose knowledge base RAG system on Azure"
