@@ -1,0 +1,49 @@
+name: Claude Code PR Review
+
+# Triggers on every PR open, update, or reopen.
+# Posts a structured review comment as the github-actions bot.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    name: Claude AI Review
+    runs-on: ubuntu-latest
+
+    # GITHUB_TOKEN needs write access to post the review
+    permissions:
+      contents: read
+      pull-requests: write
+
+    # Skip draft PRs — review when the author marks it ready
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history needed to compute the diff against the base branch
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Anthropic SDK
+        run: pip install anthropic==0.40.0
+
+      - name: Run Claude PR Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          ADDITIONS: ${{ github.event.pull_request.additions }}
+          DELETIONS: ${{ github.event.pull_request.deletions }}
+        run: python scripts/review_pr.py
