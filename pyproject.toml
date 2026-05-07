@@ -1,7 +1,7 @@
 ﻿[project]
 name = "kb_rag"
 version = "1.0.0"
-description = "kb-rag RAG System — Patient Information Leaflet Q&A on Azure"
+description = "KB RAG — General-purpose knowledge base RAG system on Azure"
 requires-python = ">=3.11"
 dependencies = [
     # ── Web framework ──────────────────────────────────────────────────────────

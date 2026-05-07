@@ -36,7 +36,7 @@ def create_app() -> FastAPI:
         title=s.app_name,
         version="1.0.0",
         description=(
-            "kb-rag RAG System — Patient Information Leaflet Q&A powered by "
+            "KB RAG — General-purpose knowledge base Q&A powered by "
             "Azure OpenAI, Azure AI Search, Cosmos DB, and Redis."
         ),
         lifespan=lifespan,
