@@ -186,21 +186,29 @@ jobs:
         id: checkov
         continue-on-error: true
         run: |
+          # Use compact-json output so checkov always writes a single file,
+          # not a directory (which happens with --output json --output-file
+          # when scanning multiple frameworks simultaneously).
           checkov \
             -d infrastructure/ \
             --framework terraform kubernetes \
+            --compact \
             --output json \
-            --output-file checkov_output.json \
-            --quiet 2>&1 || true
+            2>/dev/null > checkov_output.json || true
 
           FAILED=$(python -c "
-          import json
+          import json, os
           try:
-            d = json.load(open('checkov_output.json'))
-            results = d if isinstance(d, list) else [d]
-            failed = sum(len(r.get('results',{}).get('failed_checks',[])) for r in results)
-            print(f'{failed} IaC check(s) failed')
-          except: print('scan complete')
+            raw = open('checkov_output.json').read().strip()
+            if not raw:
+              print('scan complete')
+            else:
+              data = json.loads(raw)
+              results = data if isinstance(data, list) else [data]
+              failed = sum(len(r.get('results',{}).get('failed_checks',[])) for r in results)
+              print(f'{failed} IaC check(s) failed')
+          except Exception as e:
+            print('scan complete')
           ")
           echo "summary=${FAILED}" >> $GITHUB_OUTPUT
 

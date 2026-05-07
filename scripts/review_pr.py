@@ -40,12 +40,27 @@ def _env_bool(key: str) -> bool:
 
 
 def _read_artifact(path: str, max_chars: int = 4000) -> str:
-    """Reads a file written by an upstream job, returns '' if missing."""
+    """
+    Reads a file written by an upstream job, returns '' if missing.
+    Handles the case where checkov writes a *directory* named checkov_output.json
+    (happens with multi-framework scans) by concatenating files found inside it.
+    """
     try:
-        with open(path) as f:
-            content = f.read()
+        if os.path.isdir(path):
+            # checkov multi-framework output: directory with one JSON per framework
+            import glob
+            parts = []
+            for f in sorted(glob.glob(os.path.join(path, "**", "*.json"), recursive=True)):
+                try:
+                    parts.append(open(f).read(max_chars))
+                except OSError:
+                    pass
+            content = "\n".join(parts)
+        else:
+            with open(path) as f:
+                content = f.read()
         return content[:max_chars] + (" [truncated]" if len(content) > max_chars else "")
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         return ""
 
 
