@@ -1,20 +1,18 @@
 """
 Claude Code PR Reviewer
 =======================
-Called by .github/workflows/pr-review.yml on every pull_request event.
+Called by .github/workflows/pr-review.yml after test, lint, and security jobs.
 
-Flow:
-  1. Gets the PR diff (excluding lock files and generated assets)
-  2. Sends diff + project context to Claude claude-sonnet-4-6
-  3. Parses severity findings from the structured response
-  4. Posts the review via `gh pr review` (approve / request-changes / comment)
-
-Required env vars (all injected by the workflow):
-  ANTHROPIC_API_KEY, GH_TOKEN, PR_NUMBER, REPO,
-  BASE_SHA, HEAD_SHA, PR_TITLE, PR_BODY,
-  CHANGED_FILES, ADDITIONS, DELETIONS
+Decision matrix:
+  BLOCK (REQUEST_CHANGES, no Claude call):
+    - tests failed
+    - bandit HIGH severity issues found
+  Claude decides (APPROVE / REQUEST_CHANGES / COMMENT):
+    - all gates pass → Claude reviews code quality
+    - lint/checkov issues → included as context for Claude
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -22,226 +20,276 @@ import textwrap
 
 import anthropic
 
-# Files that add noise without useful review signal
 _SKIP_PATTERNS = [
     ":(exclude)uv.lock",
     ":(exclude)*.lock",
     ":(exclude)frontend/package-lock.json",
     ":(exclude)frontend/node_modules/**",
-    ":(exclude)data/**",
     ":(exclude)*.png",
     ":(exclude)*.jpg",
     ":(exclude)*.ico",
+    ":(exclude)data/**",
 ]
-
-# Rough character limit for the diff sent to Claude.
-# claude-sonnet-4-6 has a 200k token context window; 80k chars ≈ 20k tokens,
-# leaving ample room for the system prompt and the review response.
 _MAX_DIFF_CHARS = 80_000
 
+
+# ── Gate helpers ──────────────────────────────────────────────────────────────
+
+def _env_bool(key: str) -> bool:
+    return os.environ.get(key, "false").lower() == "true"
+
+
+def _read_artifact(path: str, max_chars: int = 4000) -> str:
+    """Reads a file written by an upstream job, returns '' if missing."""
+    try:
+        with open(path) as f:
+            content = f.read()
+        return content[:max_chars] + (" [truncated]" if len(content) > max_chars else "")
+    except FileNotFoundError:
+        return ""
+
+
+def build_gate_summary() -> tuple[bool, str]:
+    """
+    Returns (hard_block, summary_markdown).
+    hard_block=True means we post REQUEST_CHANGES immediately without calling Claude.
+    """
+    tests_passed    = _env_bool("TESTS_PASSED")
+    lint_passed     = _env_bool("LINT_PASSED")
+    security_passed = _env_bool("SECURITY_PASSED")
+    coverage_pct    = os.environ.get("COVERAGE_PCT", "N/A")
+    failed_tests    = os.environ.get("FAILED_TESTS", "0")
+    lint_summary    = os.environ.get("LINT_SUMMARY", "")
+    bandit_summary  = os.environ.get("BANDIT_SUMMARY", "")
+    checkov_summary = os.environ.get("CHECKOV_SUMMARY", "")
+
+    lines = ["## CI Gate Results\n"]
+
+    # Tests
+    icon = "✅" if tests_passed else "❌"
+    lines.append(f"| {icon} Tests | {'' if tests_passed else f'{failed_tests} test(s) FAILED'} | Coverage: {coverage_pct}% |")
+
+    # Lint
+    icon = "✅" if lint_passed else "⚠️"
+    lines.append(f"| {icon} Lint  | {lint_summary or ('clean' if lint_passed else 'issues found')} |")
+
+    # Security
+    icon = "✅" if security_passed else "🚨"
+    lines.append(f"| {icon} Security | bandit: {bandit_summary} | checkov: {checkov_summary} |")
+
+    # Hard block: fail tests or bandit HIGH security issues
+    hard_block = not tests_passed or (not security_passed and "HIGH" in bandit_summary)
+    if hard_block:
+        reasons = []
+        if not tests_passed:
+            reasons.append(f"{failed_tests} test(s) are failing")
+        if not security_passed and "HIGH" in bandit_summary:
+            reasons.append(f"bandit found HIGH severity security issues: {bandit_summary}")
+        lines.append(
+            f"\n> 🚫 **Auto-blocked**: {'; '.join(reasons)}. "
+            "Fix these before this PR can be approved."
+        )
+
+    return hard_block, "\n".join(lines)
+
+
+# ── Diff ──────────────────────────────────────────────────────────────────────
 
 def get_diff() -> str:
     base = os.environ["BASE_SHA"]
     head = os.environ["HEAD_SHA"]
-
     result = subprocess.run(
         ["git", "diff", base, head, "--"] + _SKIP_PATTERNS,
-        capture_output=True,
-        text=True,
-        check=True,
+        capture_output=True, text=True, check=True,
     )
     diff = result.stdout
-
     if len(diff) > _MAX_DIFF_CHARS:
-        truncation_note = (
-            f"\n\n[... diff truncated at {_MAX_DIFF_CHARS:,} chars "
-            f"({len(diff):,} total). Review largest files manually. ...]"
-        )
-        return diff[:_MAX_DIFF_CHARS] + truncation_note
-
+        diff = diff[:_MAX_DIFF_CHARS] + f"\n\n[... truncated at {_MAX_DIFF_CHARS:,} chars ...]"
     return diff
 
 
-def build_prompt(diff: str) -> str:
-    pr_title = os.environ.get("PR_TITLE", "")
-    pr_body = os.environ.get("PR_BODY", "No description provided.")
-    changed_files = os.environ.get("CHANGED_FILES", "?")
-    additions = os.environ.get("ADDITIONS", "?")
-    deletions = os.environ.get("DELETIONS", "?")
+# ── Claude prompt ─────────────────────────────────────────────────────────────
+
+def build_prompt(diff: str, gate_summary: str) -> str:
+    pytest_output  = _read_artifact("pytest_output.txt")
+    ruff_output    = _read_artifact("ruff_output.txt")
+    bandit_raw     = _read_artifact("bandit_output.json")
+    checkov_raw    = _read_artifact("checkov_output.json")
+
+    # Parse bandit JSON for readable findings
+    bandit_findings = ""
+    try:
+        bandit_data = json.loads(bandit_raw)
+        issues = bandit_data.get("results", [])
+        if issues:
+            bandit_findings = "\n".join(
+                f"- [{r['issue_severity']}] {r['issue_text']} "
+                f"({r['filename']}:{r['line_number']})"
+                for r in issues[:20]
+            )
+    except (json.JSONDecodeError, KeyError):
+        bandit_findings = bandit_raw[:1000] if bandit_raw else ""
 
     return textwrap.dedent(f"""\
-        You are a senior code reviewer for **KB RAG** — an Azure-hosted,
-        end-to-end Retrieval-Augmented Generation system built with:
-          - FastAPI + Python 3.11 (async/await throughout)
-          - Azure OpenAI (GPT-4o + text-embedding-3-small)
-          - Azure AI Search (hybrid vector + BM25 search)
-          - Azure Cosmos DB (MongoDB API for metadata, Gremlin API for graphs)
-          - Azure Cache for Redis (search result caching)
-          - Azure Functions (blob-triggered document processing)
-          - Azure Kubernetes Service (AKS) with Key Vault CSI driver
-          - Terraform (modular IaC for 15 Azure resources)
-          - React + TypeScript (CMS frontend)
+        You are a senior code reviewer for **KB RAG** — an Azure-hosted RAG system
+        built with FastAPI, Azure OpenAI, Azure AI Search, Cosmos DB (MongoDB + Gremlin),
+        Redis, Azure Functions, AKS, and Terraform.
 
-        ## Pull Request
+        ## PR Details
+        Title: {os.environ.get("PR_TITLE", "")}
+        Description: {os.environ.get("PR_BODY", "No description")}
+        Changed files: {os.environ.get("CHANGED_FILES")} | +{os.environ.get("ADDITIONS")} / -{os.environ.get("DELETIONS")}
 
-        **Title**: {pr_title}
-        **Description**: {pr_body}
-        **Stats**: {changed_files} files changed, +{additions} / -{deletions}
+        ## Automated Check Results (already run by CI — do not re-check these)
+
+        {gate_summary}
+
+        ### pytest output (last 50 lines)
+        ```
+        {pytest_output[-3000:] if pytest_output else "No output captured"}
+        ```
+
+        ### ruff lint output
+        ```
+        {ruff_output[-2000:] if ruff_output else "No issues"}
+        ```
+
+        ### bandit security findings
+        ```
+        {bandit_findings or "No issues"}
+        ```
 
         ## Diff
-
         ```diff
         {diff}
         ```
 
-        ## Review Instructions
+        ## Your review focus (CI already caught tests/lint/security above)
 
-        Evaluate the changes against these project standards:
+        Review the diff for things CI cannot catch:
 
-        ### Security (CRITICAL / HIGH)
-        - PII data sent to Azure OpenAI or stored in logs without masking
-          (the project uses `mask_pii()` in safety_service.py — check it is called)
-        - Hardcoded credentials, API keys, or connection strings
-        - Missing JWT auth on management endpoints
-        - Unvalidated user input reaching database queries or file paths
-        - Sensitive data in Terraform outputs without `sensitive = true`
-        - Secrets referenced in K8s manifests instead of Key Vault
+        ### Logic & Correctness
+        - Business logic errors, off-by-one, wrong conditions
+        - Race conditions in async code
+        - Incorrect Pydantic model validation (missing fields, wrong types)
 
-        ### Code Quality (HIGH / MEDIUM)
-        - Async functions called without `await`
-        - Bare `except:` or swallowed exceptions without logging
-        - Functions exceeding 50 lines
-        - Files exceeding 800 lines
-        - Nesting depth > 4 levels (use early returns instead)
-        - Missing Pydantic validation on new API request/response models
-        - `print()` statements instead of `logging`
+        ### Security gaps CI missed
+        - PII data reaching Azure OpenAI or MongoDB logs without masking
+          (check that `mask_pii()` is called before any LLM or log call)
+        - Secrets interpolated directly in Kubernetes manifests or Terraform locals
+        - Missing `Depends(require_role(...))` on new management endpoints
 
-        ### Azure / Cloud (HIGH / MEDIUM)
-        - Terraform resources that would be destroyed and recreated on rename
-          (use `terraform state mv` instead)
-        - Missing `prevent_destroy` lifecycle on stateful resources
-          (Cosmos DB, Key Vault, Storage)
-        - AKS workloads reading secrets from env literals instead of K8s Secret refs
-        - Azure Function timeout risks for large document processing jobs
+        ### Azure / Cloud correctness
+        - Terraform resources that would be destroyed on rename (missing lifecycle)
+        - Missing `prevent_destroy` on stateful Azure resources
+        - AKS pods with hardcoded env vars instead of `secretRef`
 
-        ### Testing (MEDIUM / LOW)
-        - New business logic without corresponding tests
-        - Tests that only assert no exception is raised (not meaningful)
-        - Mocks that don't reflect real Azure SDK call signatures
+        ### Maintainability
+        - Functions > 50 lines without clear extraction opportunity
+        - Missing error handling on Azure SDK calls
+        - `print()` instead of `logging`
 
-        ### Style (LOW)
-        - Inconsistent naming conventions
-        - Missing docstrings on public API functions
-        - Commented-out code left in
-
-        ## Output Format
-
-        Respond with EXACTLY this structure (keep section headers verbatim):
+        ## Output format (keep headers verbatim)
 
         ## Summary
-        [1-2 sentences: overall quality and main concern]
+        [1-2 sentences]
 
         ## Findings
 
         ### 🔴 CRITICAL
-        [Bullet list with file:line references, or write "None"]
+        [findings or "None"]
 
         ### 🟠 HIGH
-        [Bullet list with file:line references, or write "None"]
+        [findings or "None"]
 
         ### 🟡 MEDIUM
-        [Bullet list with file:line references, or write "None"]
+        [findings or "None"]
 
         ### 🟢 LOW / Suggestions
-        [Bullet list, or write "None"]
+        [findings or "None"]
 
         ## Decision
-        **[APPROVE / REQUEST_CHANGES / COMMENT]** — [one sentence justification]
+        **[APPROVE / REQUEST_CHANGES / COMMENT]** — [one sentence reason]
 
-        Rules for decision:
-        - APPROVE: zero CRITICAL and zero HIGH findings
-        - REQUEST_CHANGES: any CRITICAL finding, or two or more HIGH findings
-        - COMMENT: exactly one HIGH finding, or only MEDIUM/LOW findings
+        Decision rules:
+        - APPROVE: zero CRITICAL and zero HIGH findings (note: if CI gates above already
+          block this PR, your decision is overridden — focus on code quality only)
+        - REQUEST_CHANGES: any CRITICAL finding, or 2+ HIGH findings
+        - COMMENT: exactly 1 HIGH finding, or only MEDIUM/LOW
     """)
 
 
-def call_claude(prompt: str) -> str:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# ── Post review ───────────────────────────────────────────────────────────────
 
+def post_review(body: str, decision: str) -> None:
+    pr  = os.environ["PR_NUMBER"]
+    repo = os.environ["REPO"]
+
+    full_body = (
+        "## 🤖 Claude Code Review\n\n"
+        + body
+        + "\n\n---\n*Reviewed by [Claude claude-sonnet-4-6](https://anthropic.com) "
+        "via GitHub Actions · [workflow](.github/workflows/pr-review.yml)*"
+    )
+
+    flag = f"--{decision}"
+    result = subprocess.run(
+        ["gh", "pr", "review", pr, "--repo", repo, flag, "--body", full_body],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"gh pr review failed ({result.stderr}), falling back to comment", file=sys.stderr)
+        subprocess.run(
+            ["gh", "pr", "comment", pr, "--repo", repo, "--body", full_body],
+            check=True,
+        )
+    else:
+        print(f"✅ Review posted as {decision.upper()} on PR #{pr}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    hard_block, gate_summary = build_gate_summary()
+
+    print(f"Gate summary:\n{gate_summary}\n")
+
+    if hard_block:
+        # Tests failed or bandit HIGH — block without calling Claude API
+        print("Hard block triggered — posting REQUEST_CHANGES without Claude call")
+        post_review(gate_summary, "request-changes")
+        return
+
+    print("All hard gates passed — calling Claude for code quality review...")
+    diff = get_diff()
+    if not diff.strip():
+        print("Empty diff — nothing to review")
+        return
+
+    print(f"Diff: {len(diff):,} chars")
+    prompt = build_prompt(diff, gate_summary)
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text
+    review_text = message.content[0].text
 
-
-def parse_decision(review_text: str) -> str:
-    """Extracts APPROVE / REQUEST_CHANGES / COMMENT from the review."""
+    # Parse decision from Claude's response
+    decision = "comment"
     for line in review_text.splitlines():
-        if line.startswith("**APPROVE"):
-            return "approve"
-        if line.startswith("**REQUEST_CHANGES"):
-            return "request-changes"
-        if line.startswith("**COMMENT"):
-            return "comment"
-    return "comment"
+        stripped = line.strip()
+        if stripped.startswith("**APPROVE"):
+            decision = "approve"
+            break
+        if stripped.startswith("**REQUEST_CHANGES"):
+            decision = "request-changes"
+            break
 
-
-def has_critical_findings(review_text: str) -> bool:
-    """Returns True if the CRITICAL section has real findings (not 'None')."""
-    try:
-        section = review_text.split("### 🔴 CRITICAL")[1].split("###")[0].strip()
-        return section.lower() != "none" and len(section) > 4
-    except IndexError:
-        return False
-
-
-def post_review(review_text: str, decision: str) -> None:
-    pr_number = os.environ["PR_NUMBER"]
-    repo = os.environ["REPO"]
-
-    body = (
-        "## 🤖 Claude Code Review\n\n"
-        + review_text
-        + "\n\n---\n*Reviewed by [Claude claude-sonnet-4-6](https://anthropic.com) via GitHub Actions*"
-    )
-
-    flag = f"--{decision}"
-
-    result = subprocess.run(
-        ["gh", "pr", "review", pr_number, "--repo", repo, flag, "--body", body],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(f"gh pr review failed:\n{result.stderr}", file=sys.stderr)
-        # Fall back to a plain comment so the review is never silently lost
-        subprocess.run(
-            ["gh", "pr", "comment", pr_number, "--repo", repo, "--body", body],
-            check=True,
-        )
-    else:
-        print(f"Review posted ({decision}) on PR #{pr_number}")
-
-
-def main() -> None:
-    print("Fetching PR diff...")
-    diff = get_diff()
-
-    if not diff.strip():
-        print("Empty diff — nothing to review.")
-        return
-
-    print(f"Diff size: {len(diff):,} chars. Calling Claude...")
-    prompt = build_prompt(diff)
-    review_text = call_claude(prompt)
-
-    decision = parse_decision(review_text)
-    print(f"Decision: {decision.upper()}")
-
-    post_review(review_text, decision)
+    full_body = gate_summary + "\n\n---\n\n" + review_text
+    post_review(full_body, decision)
 
 
 if __name__ == "__main__":
