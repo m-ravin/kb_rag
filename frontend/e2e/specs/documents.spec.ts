@@ -9,8 +9,7 @@
  *   - Delete button triggers confirmation dialog then removes row
  */
 
-import * as path from "path";
-import { test as authTest, expect, mockBackend } from "../fixtures/auth";
+import { test as authTest, expect } from "../fixtures/auth";
 import { DocumentsPage } from "../pages/DocumentsPage";
 
 authTest.describe("Document list", () => {
@@ -82,11 +81,11 @@ authTest.describe("Document upload", () => {
     await docs.dropzone.click();
     const fileChooser = await fileChooserPromise;
 
-    // Use a small synthetic file — Playwright creates it from buffer
+    // Use a small synthetic file — TextEncoder is available in all browsers and Node
     await fileChooser.setFiles({
       name: "test.pdf",
       mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-1.4 test content"),
+      buffer: new TextEncoder().encode("%PDF-1.4 test content"),
     });
 
     // Wait for the upload API to be called

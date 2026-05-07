@@ -1,5 +1,4 @@
 import { Page, Locator, expect } from "@playwright/test";
-import * as path from "path";
 
 export class DocumentsPage {
   readonly titleInput: Locator;
