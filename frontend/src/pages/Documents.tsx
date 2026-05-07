@@ -83,10 +83,12 @@ export default function Documents() {
           placeholder="Document title (required)"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
+          data-testid="document-title-input"
           className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         <div
           {...getRootProps()}
+          data-testid="upload-dropzone"
           className={clsx(
             "border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors",
             isDragActive ? "border-blue-400 bg-blue-50" : "border-gray-300 hover:border-blue-400"
@@ -134,7 +136,7 @@ export default function Documents() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {docs.map((doc) => (
-                <tr key={doc.document_id} className="hover:bg-gray-50">
+                <tr key={doc.document_id} data-testid="document-row" className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-800">{doc.filename}</td>
                   <td className="px-4 py-3">
                     <span className="flex items-center gap-1.5 capitalize">
@@ -149,6 +151,7 @@ export default function Documents() {
                   <td className="px-4 py-3 text-right">
                     <button
                       onClick={() => handleDelete(doc.document_id)}
+                      data-testid="delete-button"
                       className="text-red-400 hover:text-red-600 transition-colors"
                     >
                       <Trash2 size={15} />

@@ -6,9 +6,9 @@ An end-to-end **Retrieval-Augmented Generation (RAG)** system for Patient Inform
 
 ## What This System Does
 
-1. A pharmacist or admin **uploads a PIL document** (PDF/DOCX/PPTX) through the CMS web interface.
+1. A user **uploads a document** (PDF/DOCX/PPTX) through the CMS web interface.
 2. An **Azure Function automatically wakes up**, reads the document, splits it into chunks, converts each chunk to a vector (embedding), and stores everything in three databases.
-3. When a patient or user **asks a question** via the API or chat UI:
+3. When a user **asks a question** via the API or chat UI:
    - The question is checked for PII and unsafe content
    - The question type is classified (FAQ / procedural / factual)
    - A hybrid search finds the most relevant document chunks
