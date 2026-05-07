@@ -14,3 +14,5 @@ Each ADR explains *what* was decided, *why*, and what alternatives were rejected
 | [0005](0005-uv-python-package-management.md) | uv for Python package management | accepted | 2026-05-07 |
 | [0006](0006-jwt-rbac-cms-auth.md) | JWT + role-based access control for CMS authentication | accepted | 2026-05-07 |
 | [0007](0007-tdd-80-percent-coverage.md) | TDD workflow with 80% coverage threshold enforced by CI | accepted | 2026-05-07 |
+| [0008](0008-llm-gateway.md) | LLM gateway — direct Azure OpenAI v1, LiteLLM sidecar planned for v2 | accepted | 2026-05-07 |
+| [0009](0009-accuracy-evaluation.md) | LLM accuracy evaluation — RAGAS framework deferred to v2 (gap acknowledged) | proposed | 2026-05-07 |

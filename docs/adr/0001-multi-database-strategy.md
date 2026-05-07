@@ -21,9 +21,9 @@ We use three purpose-built stores in parallel: **Azure Cosmos DB (MongoDB API)**
 - **Why not**: Vector search performance degrades significantly beyond 1M rows without partitioning strategies; graph traversal at 3+ hops is fundamentally a poor fit for a relational model
 
 ### Alternative 2: Cosmos DB only (all APIs on one account)
-- **Pros**: Single Azure resource, shared throughput possible, unified billing
-- **Cons**: Cosmos DB does not natively support vector search (at the time of design); forcing chunk embeddings into Cosmos would require client-side similarity computation, losing the HNSW index advantage
-- **Why not**: Without a purpose-built vector index, retrieval latency for semantic search would be O(n) instead of O(log n), unacceptable for real-time Q&A
+- **Pros**: Single Azure resource, shared throughput possible, unified billing; Cosmos DB for NoSQL does support native vector search via DiskANN (GA since 2024)
+- **Cons**: Cosmos DB vector search lacks built-in BM25 keyword search, semantic ranking, and faceted filtering that Azure AI Search provides out of the box; hybrid search (vector + keyword with RRF) requires custom implementation on top of Cosmos; the Gremlin API and NoSQL API cannot share a vector index on the same account
+- **Why not**: Azure AI Search is purpose-built for RAG retrieval workloads — it combines HNSW vector search, BM25 keyword search, semantic ranking, and Reciprocal Rank Fusion in a single API call. Reproducing this on Cosmos DB would require orchestrating multiple separate calls and implementing RRF manually, adding latency and maintenance burden. The decision is not that Cosmos lacks vector search, but that AI Search is the richer retrieval engine for this workload.
 
 ### Alternative 3: MongoDB Atlas + Pinecone + Neo4j
 - **Pros**: Best-in-class tools for each data type; Pinecone is the leading managed vector DB

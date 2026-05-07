@@ -25,6 +25,19 @@ _PII_PATTERNS = [
 ]
 
 
+def mask_pii(text: str) -> str:
+    """
+    Replaces every PII match with a [REDACTED] token.
+    Call this before sending user input to the LLM or storing it in logs.
+    The original question is preserved only in the response flag (flagged_pii=True)
+    so callers know masking occurred, without storing the raw PII.
+    """
+    masked = text
+    for pattern in _PII_PATTERNS:
+        masked = pattern.sub("[REDACTED]", masked)
+    return masked
+
+
 async def detect_pii(text: str) -> tuple[bool, list[str]]:
     """
     Checks whether the text contains personally identifiable information.

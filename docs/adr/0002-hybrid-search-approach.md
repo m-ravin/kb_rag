@@ -6,7 +6,7 @@
 
 ## Context
 
-Patient Information Leaflet (PIL) retrieval must handle two very different query types: natural language questions where the user does not know the exact medical terminology ("what if I take too much?"), and precise terminology lookups where the user knows the drug name or code ("Amoxicillin 500mg dosage"). A single retrieval strategy cannot optimise for both. Additionally, the same questions are asked repeatedly across sessions (common PIL questions), making caching economically significant given the cost of embedding API calls (~$0.02 per 1M tokens but adds latency).
+KB RAG is a general-purpose knowledge base retrieval system. Document retrieval must handle two very different query types: natural language questions where the user paraphrases a concept ("what if I take too much?"), and precise term lookups where the user knows the exact identifier ("Amoxicillin 500mg dosage", a product code, or a section heading). A single retrieval strategy cannot optimise for both. Additionally, the same questions are asked repeatedly across sessions in domain-specific knowledge bases (e.g., FAQs), making caching economically significant given the cost of embedding API calls (~$0.02 per 1M tokens, plus ~50ms latency per call).
 
 ## Decision
 
