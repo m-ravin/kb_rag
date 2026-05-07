@@ -1,0 +1,31 @@
+# ── Build stage: install Python dependencies with uv ─────────────────────────
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
+
+WORKDIR /app
+
+# Copy dependency files first (Docker cache layer optimisation)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# Copy application source code
+COPY backend/ ./backend/
+
+# ── Runtime stage: lean final image ──────────────────────────────────────────
+FROM python:3.11-slim-bookworm AS runtime
+
+WORKDIR /app
+
+# Copy the virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/backend /app/backend
+
+# Make the venv's Python the default for this container
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# Run the FastAPI server with Uvicorn
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

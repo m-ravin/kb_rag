@@ -1,0 +1,19 @@
+﻿apiVersion: v1
+kind: Namespace
+metadata:
+  name: kb-rag
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kb-rag-config
+  namespace: kb-rag
+data:
+  AZURE_OPENAI_GPT_DEPLOYMENT: "gpt-4o"
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: "text-embedding-3-small"
+  AZURE_SEARCH_INDEX_NAME: "pil-documents"
+  COSMOS_DB_NAME: "pil-knowledge-base"
+  COSMOS_GREMLIN_DATABASE: "pil-graph"
+  COSMOS_GREMLIN_GRAPH: "chunk-graph"
+  STORAGE_CONTAINER_NAME: "pil-documents"
+  DEBUG: "false"

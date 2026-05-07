@@ -1,0 +1,79 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kb-rag-backend
+  namespace: kb-rag
+  labels:
+    app: kb-rag-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kb-rag-backend
+  template:
+    metadata:
+      labels:
+        app: kb-rag-backend
+    spec:
+      containers:
+        - name: backend
+          image: REGISTRY_LOGIN_SERVER/kb-rag-backend:IMAGE_TAG
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: kb-rag-secrets   # Populated from Key Vault via CSI driver
+            - configMapRef:
+                name: kb-rag-config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kb-rag-backend
+  namespace: kb-rag
+spec:
+  selector:
+    app: kb-rag-backend
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: kb-rag-backend-hpa
+  namespace: kb-rag
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kb-rag-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
