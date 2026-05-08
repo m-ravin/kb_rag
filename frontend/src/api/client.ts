@@ -14,11 +14,14 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Redirect to login on 401
+// Redirect to login on 401 — but NOT when the 401 comes from the login
+// endpoint itself (wrong password), or we are already on /login.
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const isLoginEndpoint = err.config?.url?.includes("auth/token");
+    const isOnLoginPage = window.location.pathname.includes("/login");
+    if (err.response?.status === 401 && !isLoginEndpoint && !isOnLoginPage) {
       localStorage.removeItem("access_token");
       window.location.href = "/login";
     }

@@ -81,6 +81,12 @@ authTest.describe("Document upload", () => {
     await docs.dropzone.click();
     const fileChooser = await fileChooserPromise;
 
+    // Start waiting for the upload response BEFORE triggering the file selection
+    const uploadResponsePromise = page.waitForResponse(
+      (res) => res.url().includes("documents/upload"),
+      { timeout: 10_000 }
+    );
+
     // Use a small synthetic file — TextEncoder is available in all browsers and Node
     await fileChooser.setFiles({
       name: "test.pdf",
@@ -88,8 +94,8 @@ authTest.describe("Document upload", () => {
       buffer: new TextEncoder().encode("%PDF-1.4 test content"),
     });
 
-    // Wait for the upload API to be called
-    await page.waitForFunction(() => true); // allow micro-tasks to flush
+    // Wait for the upload API call to complete before asserting
+    await uploadResponsePromise;
     expect(uploadCalled).toBe(true);
     await page.screenshot({ path: "artifacts/upload-success.png" });
   });
@@ -100,9 +106,11 @@ authTest.describe("Document deletion", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
 
-    // Intercept the dialog and dismiss it (cancel)
-    page.once("dialog", (dialog) => dialog.dismiss());
+    // Register the dialog handler BEFORE clicking — handles timing on mobile
+    const dialogPromise = page.waitForEvent("dialog", { timeout: 10_000 });
     await page.locator('[data-testid="delete-button"]').first().click();
+    const dialog = await dialogPromise;
+    await dialog.dismiss();
 
     // After dismiss, document count should be unchanged
     const count = await docs.getDocumentCount();
