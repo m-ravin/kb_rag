@@ -105,13 +105,20 @@ authTest.describe("Document deletion", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
 
-    // Register the dialog handler BEFORE clicking — handles timing on mobile.
-    // force: true bypasses interception by overlapping elements on narrow viewports.
-    const dialogPromise = page.waitForEvent("dialog", { timeout: 10_000 });
+    // Use page.once so the handler runs DURING the click action (not after).
+    // waitForEvent + await click() causes a deadlock: the click waits for the page
+    // to settle, but the page can't settle until the confirm() dialog is dismissed,
+    // and we can't dismiss it until await click() returns. page.once avoids this.
+    // force: true bypasses element interception on narrow (mobile) viewports.
+    let capturedMessage = "";
+    page.once("dialog", async (dialog) => {
+      capturedMessage = dialog.message();
+      await dialog.dismiss();
+    });
     await page.locator('[data-testid="delete-button"]').first().click({ force: true });
-    const dialog = await dialogPromise;
-    await dialog.dismiss();
 
+    // Verify the confirm dialog appeared with the expected message
+    expect(capturedMessage).toContain("Delete");
     // After dismiss, document count should be unchanged
     const count = await docs.getDocumentCount();
     expect(count).toBe(2);

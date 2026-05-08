@@ -29,9 +29,7 @@ export class DocumentsPage {
   }
 
   async deleteFirstDocument() {
-    const confirmPromise = this.page.waitForEvent("dialog");
+    this.page.once("dialog", async (dialog) => dialog.accept());
     await this.documentRows.first().locator('[data-testid="delete-button"]').click({ force: true });
-    const dialog = await confirmPromise;
-    await dialog.accept();
   }
 }
