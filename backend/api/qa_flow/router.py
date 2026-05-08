@@ -36,15 +36,18 @@ async def ask(request: AskRequest) -> AskResponse:
     t_start = time.monotonic()
     session_id = request.session_id or str(uuid.uuid4())
 
-    # ── Step 1: Check for PII in the user's question ──────────────────────────
+    # ── Step 1: Detect and mask PII before anything else ─────────────────────
+    # has_pii tells the caller PII was present; safe_question is what we process.
+    # Raw PII never reaches the LLM or the log store.
     has_pii, _ = await safety_service.detect_pii(request.question)
+    safe_question = safety_service.mask_pii(request.question) if has_pii else request.question
 
-    # ── Step 2: Check the question is safe (no harmful content) ───────────────
-    is_safe, unsafe_category = await safety_service.check_content_safety(request.question)
+    # ── Step 2: Check the safe question for harmful content ───────────────────
+    is_safe, unsafe_category = await safety_service.check_content_safety(safe_question)
     if not is_safe:
         return AskResponse(
             session_id=session_id,
-            question=request.question,
+            question=safe_question,
             answer=f"I'm unable to respond to this type of request ({unsafe_category}).",
             question_type=QuestionType.UNKNOWN,
             sources=[],
@@ -56,13 +59,12 @@ async def ask(request: AskRequest) -> AskResponse:
             created_at=datetime.now(timezone.utc),
         )
 
-    # ── Step 3: Understand the question type ──────────────────────────────────
-    question_type = await llm_service.detect_question_type(request.question)
+    # ── Step 3: Understand the question type (using masked question) ──────────
+    question_type = await llm_service.detect_question_type(safe_question)
 
     # ── Step 4: Extract search keywords ───────────────────────────────────────
-    # (used to improve keyword search alongside semantic search)
-    keywords = await llm_service.extract_keywords(request.question)
-    keyword_query = " ".join(keywords) if keywords else request.question
+    keywords = await llm_service.extract_keywords(safe_question)
+    keyword_query = " ".join(keywords) if keywords else safe_question
 
     # ── Step 5: Hybrid search (vector + keyword) ──────────────────────────────
     chunks = await search_service.hybrid_search(keyword_query, top_k=request.max_chunks)
@@ -80,7 +82,7 @@ async def ask(request: AskRequest) -> AskResponse:
     # ── Step 7: Generate answer from retrieved chunks ─────────────────────────
     total_tokens = 0
     answer, tokens = await llm_service.generate_answer(
-        request.question, chunks, request.language
+        safe_question, chunks, request.language
     )
     total_tokens += tokens
 
@@ -92,8 +94,8 @@ async def ask(request: AskRequest) -> AskResponse:
     is_compliant, _ = await llm_service.check_compliance(answer)
     if not is_compliant:
         answer = (
-            "I can provide general information from the Patient Information Leaflet, "
-            "but please consult your healthcare provider for personalised advice. "
+            "I can provide general information from the knowledge base, "
+            "but please verify with an authoritative source before acting on it. "
             + answer
         )
 
@@ -102,10 +104,10 @@ async def ask(request: AskRequest) -> AskResponse:
 
     latency_ms = round((time.monotonic() - t_start) * 1000, 2)
 
-    # ── Step 11: Log to Cosmos MongoDB for reporting ──────────────────────────
+    # ── Step 11: Log masked question to Cosmos MongoDB (never the raw PII) ─────
     await monitoring_service.log_qa_interaction(
         session_id=session_id,
-        question=request.question,
+        question=safe_question,
         answer=answer,
         question_type=question_type.value,
         sources=[c.model_dump() for c in chunks],
@@ -118,7 +120,7 @@ async def ask(request: AskRequest) -> AskResponse:
 
     return AskResponse(
         session_id=session_id,
-        question=request.question,
+        question=safe_question,
         answer=answer,
         question_type=question_type,
         sources=chunks,

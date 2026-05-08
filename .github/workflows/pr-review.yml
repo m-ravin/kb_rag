@@ -1,0 +1,282 @@
+name: Claude Code PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# GITHUB_TOKEN permissions shared across all jobs
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Job 1: Run the full test suite ──────────────────────────────────────────
+  test:
+    name: Tests & Coverage
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    outputs:
+      result:       ${{ steps.run.outcome }}
+      coverage:     ${{ steps.cov.outputs.pct }}
+      failed_count: ${{ steps.run.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --dev --no-install-project
+
+      - name: Run pytest with coverage
+        id: run
+        # continue-on-error so the review job still runs even when tests fail
+        continue-on-error: true
+        env:
+          # Ensure backend package is importable without pip install
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run pytest tests/ \
+            --tb=short \
+            --cov=backend \
+            --cov-report=json \
+            --cov-report=term-missing \
+            -q 2>&1 | tee pytest_output.txt
+
+          FAILED=$(grep -E "^FAILED" pytest_output.txt | wc -l | xargs)
+          echo "failed=${FAILED}" >> $GITHUB_OUTPUT
+
+      - name: Extract coverage percentage
+        id: cov
+        run: |
+          if [ -f coverage.json ]; then
+            PCT=$(python -c "import json; d=json.load(open('coverage.json')); print(d['totals']['percent_covered_display'])")
+          else
+            PCT="N/A"
+          fi
+          echo "pct=${PCT}" >> $GITHUB_OUTPUT
+
+      - name: Upload pytest output
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest_output.txt
+          retention-days: 3
+
+  # ── Job 2: Lint (ruff for Python, ESLint for frontend) ───────────────────────
+  lint:
+    name: Linting
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    outputs:
+      result: ${{ steps.ruff.outcome }}
+      output: ${{ steps.ruff.outputs.summary }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --dev --no-install-project
+
+      - name: Run ruff (lint + format check)
+        id: ruff
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run ruff check backend/ azure-functions/ scripts/ \
+            --output-format=github \
+            2>&1 | tee ruff_output.txt || true
+
+          uv run ruff format --check backend/ azure-functions/ scripts/ \
+            2>&1 | tee -a ruff_output.txt || true
+
+          ERRORS=$(grep -c "error\|warning" ruff_output.txt 2>/dev/null || echo "0")
+          echo "summary=${ERRORS} ruff issue(s) found" >> $GITHUB_OUTPUT
+
+      - name: Run mypy type check
+        id: mypy
+        continue-on-error: true
+        run: |
+          uv run mypy backend/ --ignore-missing-imports --no-error-summary \
+            2>&1 | tail -5 | tee mypy_output.txt || true
+
+      - name: Lint frontend (if package.json changed)
+        continue-on-error: true
+        run: |
+          if git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep -q "^frontend/"; then
+            cd frontend && npm ci --silent && npm run lint 2>&1 | tee ../eslint_output.txt || true
+          else
+            echo "No frontend changes — skipping ESLint"
+          fi
+
+      - name: Upload lint output
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-output
+          path: |
+            ruff_output.txt
+            mypy_output.txt
+          retention-days: 3
+
+  # ── Job 3: Security scanning ─────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    outputs:
+      result:          ${{ steps.bandit.outcome }}
+      bandit_summary:  ${{ steps.bandit.outputs.summary }}
+      checkov_summary: ${{ steps.checkov.outputs.summary }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security scanners
+        run: pip install bandit==1.8.3 checkov==3.2.350 pip-audit==2.7.3
+
+      - name: bandit — Python security lint
+        id: bandit
+        continue-on-error: true
+        run: |
+          bandit -r backend/ azure-functions/ scripts/ \
+            -f json \
+            -o bandit_output.json \
+            --severity-level medium \
+            -q 2>&1 || true
+
+          HIGH=$(python -c "
+          import json, sys
+          try:
+            d = json.load(open('bandit_output.json'))
+            results = d.get('results', [])
+            high = [r for r in results if r['issue_severity'] == 'HIGH']
+            print(f'{len(high)} HIGH severity issue(s)')
+          except: print('scan complete')
+          ")
+          echo "summary=${HIGH}" >> $GITHUB_OUTPUT
+
+      - name: checkov — Terraform and K8s IaC scan
+        id: checkov
+        continue-on-error: true
+        run: |
+          # Use compact-json output so checkov always writes a single file,
+          # not a directory (which happens with --output json --output-file
+          # when scanning multiple frameworks simultaneously).
+          checkov \
+            -d infrastructure/ \
+            --framework terraform kubernetes \
+            --compact \
+            --output json \
+            2>/dev/null > checkov_output.json || true
+
+          FAILED=$(python -c "
+          import json, os
+          try:
+            raw = open('checkov_output.json').read().strip()
+            if not raw:
+              print('scan complete')
+            else:
+              data = json.loads(raw)
+              results = data if isinstance(data, list) else [data]
+              failed = sum(len(r.get('results',{}).get('failed_checks',[])) for r in results)
+              print(f'{failed} IaC check(s) failed')
+          except Exception as e:
+            print('scan complete')
+          ")
+          echo "summary=${FAILED}" >> $GITHUB_OUTPUT
+
+      - name: pip-audit — dependency vulnerability scan
+        id: pip_audit
+        continue-on-error: true
+        run: |
+          pip-audit --requirement <(pip freeze) \
+            --format json \
+            -o pip_audit_output.json 2>&1 || true
+
+      - name: Upload security output
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-output
+          path: |
+            bandit_output.json
+            checkov_output.json
+            pip_audit_output.json
+          retention-days: 3
+
+  # ── Job 4: Claude AI Review ───────────────────────────────────────────────────
+  # Runs after all checks — even if they fail — so the review always posts
+  # and surfaces all findings in one place.
+  review:
+    name: Claude AI Review
+    runs-on: ubuntu-latest
+    needs: [test, lint, security]
+    if: always() && !cancelled() && github.event.pull_request.draft == false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Anthropic SDK
+        run: pip install anthropic==0.40.0
+
+      - name: Download all check artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Run Claude PR Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER:         ${{ github.event.pull_request.number }}
+          REPO:              ${{ github.repository }}
+          BASE_SHA:          ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA:          ${{ github.event.pull_request.head.sha }}
+          PR_TITLE:          ${{ github.event.pull_request.title }}
+          PR_BODY:           ${{ github.event.pull_request.body }}
+          CHANGED_FILES:     ${{ github.event.pull_request.changed_files }}
+          ADDITIONS:         ${{ github.event.pull_request.additions }}
+          DELETIONS:         ${{ github.event.pull_request.deletions }}
+          # Gate results passed from upstream jobs
+          TESTS_PASSED:      ${{ needs.test.outputs.result == 'success' }}
+          COVERAGE_PCT:      ${{ needs.test.outputs.coverage }}
+          FAILED_TESTS:      ${{ needs.test.outputs.failed_count }}
+          LINT_PASSED:       ${{ needs.lint.outputs.result == 'success' }}
+          LINT_SUMMARY:      ${{ needs.lint.outputs.output }}
+          SECURITY_PASSED:   ${{ needs.security.outputs.result == 'success' }}
+          BANDIT_SUMMARY:    ${{ needs.security.outputs.bandit_summary }}
+          CHECKOV_SUMMARY:   ${{ needs.security.outputs.checkov_summary }}
+        run: python scripts/review_pr.py

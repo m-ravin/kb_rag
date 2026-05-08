@@ -14,13 +14,28 @@ from backend.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Simple regex patterns for local PII detection fallback
+# Regex patterns for local PII detection fallback
 _PII_PATTERNS = [
-    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),            # SSN
-    re.compile(r"\b[A-Z]{1,2}\d{6,9}[A-Z]?\b"),      # Passport / NRIC
-    re.compile(r"\b\+?[\d\s\-]{8,15}\b"),             # Phone numbers
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                        # US SSN
+    re.compile(r"\b[A-Z]{1,2}\d{6,9}[A-Z]?\b"),                  # Passport
+    re.compile(r"\b\d{6}-\d{2}-\d{4}\b"),                        # MY NRIC with dashes (870315-07-1234)
+    re.compile(r"\b\d{12}\b"),                                    # MY NRIC without dashes (870315071234)
+    re.compile(r"\b\+?[\d\s\-]{8,15}\b"),                        # Phone numbers
     re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),  # Email
 ]
+
+
+def mask_pii(text: str) -> str:
+    """
+    Replaces every PII match with a [REDACTED] token.
+    Call this before sending user input to the LLM or storing it in logs.
+    The original question is preserved only in the response flag (flagged_pii=True)
+    so callers know masking occurred, without storing the raw PII.
+    """
+    masked = text
+    for pattern in _PII_PATTERNS:
+        masked = pattern.sub("[REDACTED]", masked)
+    return masked
 
 
 async def detect_pii(text: str) -> tuple[bool, list[str]]:

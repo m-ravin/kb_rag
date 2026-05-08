@@ -1,4 +1,4 @@
-﻿"""
+"""
 Central configuration — reads every setting from environment variables.
 All secrets come from Azure Key Vault via the Kubernetes CSI driver at runtime.
 """

@@ -173,7 +173,7 @@ def _chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[dic
     for i in range(0, len(words), step):
         chunk_words = words[i : i + chunk_size]
         chunk_text = " ".join(chunk_words)
-        if len(chunk_text.strip()) < 20:
+        if not chunk_text.strip():
             continue
         chunks.append(
             {

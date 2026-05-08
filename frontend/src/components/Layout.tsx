@@ -1,4 +1,4 @@
-﻿import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LayoutDashboard, FileText, MessageSquare, LogOut } from "lucide-react";
 import clsx from "clsx";
 
@@ -25,11 +25,12 @@ export default function Layout() {
           <h1 className="text-xl font-bold text-blue-700">kb-rag CMS</h1>
           <p className="text-xs text-gray-500 mt-1">Knowledge Management</p>
         </div>
-        <nav className="flex-1 p-4 space-y-1">
+        <nav className="flex-1 p-4 space-y-1" data-testid="sidebar-nav">
           {navItems.map(({ to, label, icon: Icon }) => (
             <Link
               key={to}
               to={to}
+              data-testid={`nav-${label.toLowerCase().replace(/[^a-z]/g, "-")}`}
               className={clsx(
                 "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                 location.pathname.startsWith(to)
@@ -45,6 +46,7 @@ export default function Layout() {
         <div className="p-4 border-t border-gray-200">
           <button
             onClick={handleLogout}
+            data-testid="logout-button"
             className="flex items-center gap-3 px-3 py-2 text-sm text-gray-600 hover:text-red-600 w-full rounded-lg hover:bg-red-50 transition-colors"
           >
             <LogOut size={18} />

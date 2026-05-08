@@ -6,6 +6,10 @@ output "aks_cluster_name" {
   value = module.aks.cluster_name
 }
 
+output "acr_login_server" {
+  value = module.aks.acr_login_server
+}
+
 output "search_endpoint" {
   value = module.search.endpoint
 }

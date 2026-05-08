@@ -14,13 +14,21 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Redirect to login on 401
+// Module-level flag: true while the login() function is executing.
+// Used by the 401 interceptor to skip the redirect-to-login during login itself.
+let _loginInProgress = false;
+
+// Redirect to login on 401 — but never while a login call is in-flight
+// (wrong password) and never when we are already on /login.
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem("access_token");
-      window.location.href = "/login";
+    if (err.response?.status === 401 && !_loginInProgress) {
+      const isOnLoginPage = window.location.pathname === "/login";
+      if (!isOnLoginPage) {
+        localStorage.removeItem("access_token");
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(err);
   }
@@ -90,8 +98,13 @@ export const login = async (email: string, password: string): Promise<void> => {
   const form = new URLSearchParams();
   form.append("username", email);
   form.append("password", password);
-  const res = await api.post<{ access_token: string }>("/manage/auth/token", form, {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  });
-  localStorage.setItem("access_token", res.data.access_token);
+  _loginInProgress = true;
+  try {
+    const res = await api.post<{ access_token: string }>("/manage/auth/token", form, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+    localStorage.setItem("access_token", res.data.access_token);
+  } finally {
+    _loginInProgress = false;
+  }
 };
