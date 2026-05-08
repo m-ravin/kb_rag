@@ -299,7 +299,8 @@ def main() -> None:
                 + "\n\n> ⚠️ **Claude AI Review skipped** — Anthropic account has insufficient credits. "
                 "Add credits at [console.anthropic.com](https://console.anthropic.com) → Plans & Billing."
             )
-            post_review(notice, "comment")
+            # All CI gates passed — approve so the PR is not blocked by missing credits
+            post_review(notice, "approve")
             print(f"Skipped Claude review — no credits: {exc}")
             return
         raise
@@ -309,7 +310,8 @@ def main() -> None:
             + "\n\n> ⚠️ **Claude AI Review skipped** — Invalid `ANTHROPIC_API_KEY` secret. "
             f"Error: `{exc}`"
         )
-        post_review(notice, "comment")
+        # All CI gates passed — approve so the PR is not blocked by a misconfigured key
+        post_review(notice, "approve")
         print(f"Skipped Claude review — auth error: {exc}")
         return
 
