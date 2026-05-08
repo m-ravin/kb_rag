@@ -1,8 +1,8 @@
 name: Terraform — Provision Azure Infrastructure
 
+# Manual trigger only — infrastructure changes require explicit confirmation,
+# same as application deployment. Azure credentials are not available to PRs.
 on:
-  pull_request:
-    paths: ["infrastructure/terraform/**"]
   workflow_dispatch:
     inputs:
       action:
