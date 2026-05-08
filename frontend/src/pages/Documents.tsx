@@ -72,7 +72,7 @@ export default function Documents() {
     <div className="p-8">
       <h2 className="text-2xl font-bold text-gray-800 mb-1">Documents</h2>
       <p className="text-gray-500 text-sm mb-6">
-        Upload PIL documents (PDF, DOCX, PPTX). They are automatically processed and indexed.
+        Upload documents (PDF, DOCX, PPTX). They are automatically processed and indexed into the knowledge base.
       </p>
 
       {/* Upload section */}
@@ -122,45 +122,47 @@ export default function Documents() {
         {loading ? (
           <p className="p-6 text-gray-400 text-sm">Loading…</p>
         ) : docs.length === 0 ? (
-          <p className="p-6 text-gray-400 text-sm">No documents yet. Upload your first PIL!</p>
+          <p className="p-6 text-gray-400 text-sm">No documents yet. Upload your first document!</p>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
-              <tr>
-                <th className="px-4 py-3 text-left">Filename</th>
-                <th className="px-4 py-3 text-left">Status</th>
-                <th className="px-4 py-3 text-left">Chunks</th>
-                <th className="px-4 py-3 text-left">Uploaded</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {docs.map((doc) => (
-                <tr key={doc.document_id} data-testid="document-row" className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-800">{doc.filename}</td>
-                  <td className="px-4 py-3">
-                    <span className="flex items-center gap-1.5 capitalize">
-                      {STATUS_ICON[doc.status]}
-                      {doc.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-gray-500">{doc.chunk_count}</td>
-                  <td className="px-4 py-3 text-gray-400">
-                    {new Date(doc.created_at).toLocaleDateString()}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => handleDelete(doc.document_id)}
-                      data-testid="delete-button"
-                      className="text-red-400 hover:text-red-600 transition-colors"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[540px]">
+              <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-3 text-left">Filename</th>
+                  <th className="px-4 py-3 text-left">Status</th>
+                  <th className="px-4 py-3 text-left">Chunks</th>
+                  <th className="px-4 py-3 text-left">Uploaded</th>
+                  <th className="px-4 py-3" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {docs.map((doc) => (
+                  <tr key={doc.document_id} data-testid="document-row" className="hover:bg-gray-50">
+                    <td className="px-4 py-3 font-medium text-gray-800">{doc.filename}</td>
+                    <td className="px-4 py-3">
+                      <span className="flex items-center gap-1.5 capitalize">
+                        {STATUS_ICON[doc.status]}
+                        {doc.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500">{doc.chunk_count}</td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {new Date(doc.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => handleDelete(doc.document_id)}
+                        data-testid="delete-button"
+                        className="text-red-400 hover:text-red-600 transition-colors"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {total > 20 && (

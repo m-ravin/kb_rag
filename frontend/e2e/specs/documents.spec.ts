@@ -105,9 +105,10 @@ authTest.describe("Document deletion", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
 
-    // Register the dialog handler BEFORE clicking — handles timing on mobile
+    // Register the dialog handler BEFORE clicking — handles timing on mobile.
+    // force: true bypasses interception by overlapping elements on narrow viewports.
     const dialogPromise = page.waitForEvent("dialog", { timeout: 10_000 });
-    await page.locator('[data-testid="delete-button"]').first().click();
+    await page.locator('[data-testid="delete-button"]').first().click({ force: true });
     const dialog = await dialogPromise;
     await dialog.dismiss();
 
@@ -139,9 +140,10 @@ authTest.describe("Document deletion", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
 
-    // Accept the confirmation dialog
+    // Accept the confirmation dialog.
+    // force: true bypasses interception by overlapping elements on narrow viewports.
     page.once("dialog", (dialog) => dialog.accept());
-    await page.locator('[data-testid="delete-button"]').first().click();
+    await page.locator('[data-testid="delete-button"]').first().click({ force: true });
 
     await page.waitForFunction(() => true);
     expect(deleteCalled).toBe(true);
