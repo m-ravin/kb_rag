@@ -150,9 +150,16 @@ authTest.describe("Document deletion", () => {
     // Accept the confirmation dialog.
     // force: true bypasses interception by overlapping elements on narrow viewports.
     page.once("dialog", (dialog) => dialog.accept());
-    await page.locator('[data-testid="delete-button"]').first().click({ force: true });
 
-    await page.waitForFunction(() => true);
+    // Wait for the DELETE network response before asserting — avoids the
+    // page.waitForFunction(() => true) no-op antipattern that gave no real guarantee.
+    const deleteResponsePromise = page.waitForResponse(
+      (res) => res.request().method() === "DELETE" && res.url().includes("documents"),
+      { timeout: 10_000 }
+    );
+    await page.locator('[data-testid="delete-button"]').first().click({ force: true });
+    await deleteResponsePromise;
+
     expect(deleteCalled).toBe(true);
     await page.screenshot({ path: "artifacts/delete-confirmed.png" });
   });
