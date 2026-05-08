@@ -11,9 +11,9 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
-    "composite": true,
     "noUnusedLocals": false,
-    "noUnusedParameters": false
+    "noUnusedParameters": false,
+    "types": ["node"]
   },
   "include": ["e2e"]
 }

@@ -87,11 +87,10 @@ authTest.describe("Document upload", () => {
       { timeout: 10_000 }
     );
 
-    // Use a small synthetic file — TextEncoder is available in all browsers and Node
     await fileChooser.setFiles({
       name: "test.pdf",
       mimeType: "application/pdf",
-      buffer: new TextEncoder().encode("%PDF-1.4 test content"),
+      buffer: Buffer.from("PDF test content"),
     });
 
     // Wait for the upload API call to complete before asserting
