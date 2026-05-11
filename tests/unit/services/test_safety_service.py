@@ -29,9 +29,15 @@ def _mock_http_with_response(json_body: dict):
 
 
 def _mock_http_with_error(exc: Exception):
-    """Returns an httpx.AsyncClient mock that raises the given exception on post."""
+    """Returns an httpx.AsyncClient mock that raises the given exception when post() is awaited.
+
+    The error is injected on post(), not __aenter__, so the mock remains valid if the
+    calling code is ever refactored to share a client instance instead of using async-with.
+    """
+    mock_inner = MagicMock()
+    mock_inner.post = AsyncMock(side_effect=exc)
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(side_effect=exc)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_inner)
     mock_client.__aexit__ = AsyncMock(return_value=False)
     return mock_client
 
