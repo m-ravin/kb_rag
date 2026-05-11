@@ -8,13 +8,22 @@ Think of these as tools in a toolbox: each one does one thing very well.
 """
 
 import time
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.core.auth import get_current_user
 from backend.models.qa import TaskRequest, TaskResponse
 from backend.services import llm_service, safety_service
 
-router = APIRouter(prefix="/tasks", tags=["Task APIs"])
+router = APIRouter(
+    prefix="/tasks",
+    tags=["Task APIs"],
+    dependencies=[Depends(get_current_user)],
+)
+
+_VALID_TONES = {"professional", "friendly", "simple"}
+_VALID_LANGUAGES = {"en", "ms", "zh", "ta", "fr", "de", "es", "ar", "pt", "id"}
 
 
 @router.post("/content-safety", response_model=TaskResponse)
@@ -95,6 +104,8 @@ async def translate(req: TaskRequest) -> TaskResponse:
     """
     t = time.monotonic()
     target_lang = req.options.get("language", "en")
+    if target_lang not in _VALID_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Invalid language. Must be one of: {sorted(_VALID_LANGUAGES)}")
     translated, tokens = await llm_service.translate_text(req.text, target_lang)
     return TaskResponse(
         result={"translated_text": translated, "target_language": target_lang},
@@ -111,6 +122,8 @@ async def summarise(req: TaskRequest) -> TaskResponse:
     """
     t = time.monotonic()
     max_sentences = req.options.get("max_sentences", 5)
+    if not isinstance(max_sentences, int) or not (1 <= max_sentences <= 20):
+        raise HTTPException(status_code=400, detail="max_sentences must be an integer between 1 and 20")
     summary, tokens = await llm_service.summarise_text(req.text, max_sentences)
     return TaskResponse(
         result={"summary": summary},
@@ -127,6 +140,8 @@ async def tune_wording(req: TaskRequest) -> TaskResponse:
     """
     t = time.monotonic()
     tone = req.options.get("tone", "professional")
+    if tone not in _VALID_TONES:
+        raise HTTPException(status_code=400, detail=f"Invalid tone. Must be one of: {sorted(_VALID_TONES)}")
     tuned, tokens = await llm_service.tune_wording(req.text, tone)
     return TaskResponse(
         result={"tuned_text": tuned, "tone": tone},

@@ -19,8 +19,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from backend.core.limiter import limiter
 from backend.models.qa import AskRequest, AskResponse, QuestionType
 from backend.services import llm_service, search_service, safety_service, monitoring_service
 
@@ -28,7 +29,8 @@ router = APIRouter(prefix="/qa", tags=["Q&A Flow"])
 
 
 @router.post("/ask", response_model=AskResponse)
-async def ask(request: AskRequest) -> AskResponse:
+@limiter.limit("30/minute")
+async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     """
     Full RAG pipeline: question → safety → search → LLM → answer.
     This is the endpoint the chat UI calls.
@@ -40,7 +42,7 @@ async def ask(request: AskRequest) -> AskResponse:
     # has_pii tells the caller PII was present; safe_question is what we process.
     # Raw PII never reaches the LLM or the log store.
     has_pii, _ = await safety_service.detect_pii(request.question)
-    safe_question = safety_service.mask_pii(request.question) if has_pii else request.question
+    safe_question = await safety_service.mask_pii(request.question) if has_pii else request.question
 
     # ── Step 2: Check the safe question for harmful content ───────────────────
     is_safe, unsafe_category = await safety_service.check_content_safety(safe_question)

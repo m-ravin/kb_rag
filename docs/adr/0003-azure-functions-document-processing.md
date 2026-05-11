@@ -37,11 +37,15 @@ We use an **Azure Function with a blob storage trigger** (`azure-functions/docum
 - Built-in retry on transient failures (configured in `host.json`)
 - Clean separation of concerns: API serves queries, Function processes documents
 - Status visible in MongoDB (`pending` → `processing` → `indexed` / `failed`) throughout
+- Embedding batching (16 chunks/call) reduces OpenAI API round-trips by ~16× vs. per-chunk calls
 
 ### Negative
 - **Cold start latency**: First invocation after idle can take 3–8 seconds for Python runtime initialisation. Acceptable for a batch process; would not be acceptable for a real-time API.
 - **5-minute execution timeout on Consumption plan**: Very large PDFs (>500 pages) may time out. Mitigation: upgrade to Premium plan or split oversized documents at upload time.
 - **Local development requires Azurite emulator**: The blob trigger cannot be tested locally without Azure Storage emulation. `docker-compose.yml` can be extended with `mcr.microsoft.com/azure-storage/azurite` if needed.
+
+### Implementation note
+The function is **fully synchronous** (`def process_document`, not `async def`). Mixing async Azure SDK clients with the synchronous `gremlin_python` and `PyMuPDF` libraries inside a single `async def` caused event-loop deadlocks under concurrent invocations. All I/O uses the synchronous SDK variants (`openai.AzureOpenAI`, `pymongo.MongoClient`, `azure.search.documents.SearchClient`); the Azure Functions Python runtime manages the worker process pool.
 
 ### Risks
 - **Partial pipeline failure**: If the Function completes embedding but crashes before Gremlin graph construction, the document is searchable but lacks graph context. Mitigation: MongoDB status field tracks per-step completion; a re-run endpoint is provided at `POST /manage/documents/{id}/reprocess`.

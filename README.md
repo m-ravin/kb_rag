@@ -27,7 +27,7 @@ User Question
      │
      ▼
 [Q&A Flow API]  (FastAPI on AKS)
-  ├─ PII Detection + Masking  →  [Regex + Azure AI Language]
+  ├─ PII Detection + Masking  →  [Presidio (local NLP, no data egress)]
   ├─ Content Safety check     →  [Azure AI Content Safety]
   ├─ Question Type            →  [GPT-4o]
   ├─ Keyword Extraction       →  [GPT-4o]
@@ -50,7 +50,7 @@ Document Upload (CMS)
 [Azure Function: document_processor]
   ├─ Extract text (PyMuPDF / python-docx / python-pptx)
   ├─ Chunk text (512 words, 64-word overlap)
-  ├─ Embed chunks  →  [Azure OpenAI Embeddings]
+  ├─ Embed chunks (batched, 16/call)  →  [Azure OpenAI Embeddings]
   ├─ Index chunks  →  [Azure AI Search]
   └─ Build graph   →  [Cosmos Gremlin]
 ```
@@ -108,7 +108,7 @@ kb_rag/
 │   │   ├── Dashboard.tsx             # Metrics charts (Recharts)
 │   │   ├── Documents.tsx             # Upload + manage documents (drag-drop)
 │   │   └── QATest.tsx                # Live Q&A test console
-│   ├── e2e/                          # Playwright E2E tests (21 tests)
+│   ├── e2e/                          # Playwright E2E tests (38 tests)
 │   │   ├── specs/                    # auth, qa-console, documents, dashboard
 │   │   ├── pages/                    # Page Object Models
 │   │   └── fixtures/auth.ts          # JWT injection + full API mocking
@@ -133,7 +133,7 @@ kb_rag/
 │       └── secret-provider-class.yaml.tpl  # Key Vault CSI driver template
 │
 ├── docs/
-│   ├── adr/                         # 9 Architecture Decision Records
+│   ├── adr/                         # 10 Architecture Decision Records
 │   │   └── README.md                # ADR index
 │   ├── CONTRIBUTING.md              # Development setup and workflow
 │   └── RUNBOOK.md                   # Deployment and operations guide
@@ -153,7 +153,11 @@ kb_rag/
 │   ├── terraform.yml                # Terraform plan/apply + GitHub secret sync
 │   └── e2e.yml                      # Playwright E2E tests on every PR
 │
-├── docker-compose.yml               # Local dev: backend + frontend + Redis
+├── presidio-service/                 # Standalone PII detection microservice
+│   ├── main.py                      # FastAPI: /health /entities /analyze /anonymize /redact
+│   └── Dockerfile                   # Multi-stage uv build — bakes in spaCy en_core_web_lg
+│
+├── docker-compose.yml               # Local dev: backend + frontend + Redis + Presidio
 ├── Dockerfile.backend               # Multi-stage uv build
 ├── Dockerfile.frontend              # Vite build → Nginx
 ├── pyproject.toml                   # Python deps (managed by uv)
@@ -278,10 +282,10 @@ Push to `main` — GitHub Actions handles the rest:
 | `POST` | `/tasks/compliance-check` | — | Validate against content guidelines |
 | `POST` | `/tasks/language-check` | — | Detect language (returns ISO 639-1 code) |
 | `POST` | `/manage/auth/token` | — | Login — returns JWT access token |
-| `POST` | `/manage/auth/register` | Admin | Create new CMS user |
+| `POST` | `/manage/auth/register` | Admin | Create new CMS user (JSON body: `email`, `password` ≥12 chars, `role`) |
 | `POST` | `/manage/documents/upload` | Admin/Editor | Upload a document (PDF/DOCX/PPTX) |
 | `GET` | `/manage/documents` | Any auth | List all documents with pagination |
-| `DELETE` | `/manage/documents/{id}` | Admin | Remove document from knowledge base |
+| `DELETE` | `/manage/documents/{id}` | Admin | Remove document — cascades to blob, search index, and graph |
 | `GET` | `/manage/activity-logs` | Admin | CMS activity audit log |
 | `GET` | `/manage/metrics` | Any auth | Q&A performance metrics |
 | `GET` | `/health` | — | Kubernetes liveness probe |
@@ -312,7 +316,7 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | `COSMOS_GREMLIN_KEY` | Cosmos DB primary key |
 | `REDIS_CONNECTION` | Redis connection string (TLS, port 6380 in Azure) |
 | `STORAGE_CONNECTION` | Azure Data Lake Storage Gen2 connection string |
-| `JWT_SECRET` | Random 64-char string for signing JWT tokens |
+| `JWT_SECRET` | Strong random string (≥32 chars) for signing JWT tokens — app refuses to start if unset |
 
 ### Optional
 
@@ -322,9 +326,11 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | `AZURE_SEARCH_INDEX_NAME` | `kb-documents` | Azure AI Search index name |
 | `COSMOS_DB_NAME` | `pil-knowledge-base` | Cosmos MongoDB database name |
 | `STORAGE_CONTAINER_NAME` | `kb-documents` | ADLS container for uploaded files |
-| `CONTENT_SAFETY_ENDPOINT` | — | Azure AI Content Safety endpoint (blank = regex fallback) |
+| `CONTENT_SAFETY_ENDPOINT` | — | Azure AI Content Safety endpoint (for harmful content checks) |
 | `CONTENT_SAFETY_KEY` | — | Azure AI Content Safety key |
 | `APPINSIGHTS_CONNECTION_STRING` | — | Application Insights connection string |
+| `PRESIDIO_ENDPOINT` | `http://presidio-service:8080` | Presidio PII service URL — Docker Compose resolves via service name; override for external deployments |
+| `ALLOWED_ORIGINS` | `["http://localhost:3000"]` | JSON array of permitted CORS origins — set to your frontend URL in production |
 | `DEBUG` | `false` | Enable hot-reload and verbose logging |
 
 <!-- END AUTO-GENERATED -->
@@ -336,7 +342,7 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | `pr-review.yml` | Every PR | Tests + Coverage, Linting, Security Scan, Claude AI Review |
-| `e2e.yml` | Every PR | Playwright E2E (21 tests, Chromium + Firefox + Mobile) |
+| `e2e.yml` | Every PR | Playwright E2E (38 tests, Chromium + Firefox + Mobile) |
 | `terraform.yml` | PR on `infrastructure/**` or manual dispatch | Terraform plan / apply / destroy |
 | `deploy.yml` | Push to `main` | Key Vault → K8s secret sync, Docker build → ACR, AKS rolling deploy |
 
@@ -354,17 +360,19 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 
 ## Architecture Decision Records
 
-Nine ADRs in [`docs/adr/`](docs/adr/) document all major technical choices with rejected alternatives and rationale. See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development workflow and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for deployment procedures.
+Ten ADRs in [`docs/adr/`](docs/adr/) document all major technical choices with rejected alternatives and rationale. See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development workflow and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for deployment procedures.
 
 ---
 
 ## Security
 
-- PII detected and **masked with `[REDACTED]`** before reaching the LLM or logs
-- Content safety screening on every input and output
+- PII detected with **Microsoft Presidio** (local NLP — data never leaves the machine) and masked with `[REDACTED]` before reaching the LLM or logs; custom recogniser for Malaysian NRIC
+- Content safety screening via Azure AI Content Safety on every input
+- Retrieved document chunks are wrapped in boundary tokens to prevent prompt injection
+- CORS locked to explicit origin allowlist (`ALLOWED_ORIGINS`)
+- `JWT_SECRET` has no default — app refuses to start without it
 - No secrets in source code — all from Azure Key Vault via CSI driver
 - JWT auth + RBAC (admin / editor / viewer) on all CMS endpoints
-- AgentShield security audit: **Grade A (97/100)**
 
 ---
 

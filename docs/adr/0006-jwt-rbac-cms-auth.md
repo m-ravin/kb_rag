@@ -43,4 +43,4 @@ We use **JWT (JSON Web Tokens) with role-based access control** implemented in `
 - **No MFA**: JWT + password auth has no second factor. Acceptable for an internal document management tool; unacceptable for patient-facing systems.
 
 ### Risks
-- **JWT_SECRET misconfiguration**: If `JWT_SECRET` is weak or shared across environments, tokens from dev can be used in prod. Mitigation: `JWT_SECRET` is generated per-environment by Terraform and stored in Key Vault; `pyproject.toml` default warns "change-me-in-production".
+- **JWT_SECRET misconfiguration**: If `JWT_SECRET` is weak or shared across environments, tokens from dev can be used in prod. Mitigation: `JWT_SECRET` has **no default** — `pydantic-settings` raises `ValidationError` at startup if the variable is absent, so the application cannot boot with a missing or placeholder secret. It is generated per-environment by Terraform and stored in Key Vault.

@@ -122,7 +122,7 @@ export default function Documents() {
         {loading ? (
           <p className="p-6 text-gray-400 text-sm">Loading…</p>
         ) : docs.length === 0 ? (
-          <p className="p-6 text-gray-400 text-sm">No documents yet. Upload your first document!</p>
+          <p data-testid="documents-empty-state" className="p-6 text-gray-400 text-sm">No documents yet. Upload your first document!</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[540px]">

@@ -84,9 +84,8 @@ authTest.describe("Q&A Console — Ask button states", () => {
   });
 });
 
-authTest.describe("Q&A Console — PII detection", () => {
+authTest.describe("Q&A Console — content flags", () => {
   authTest("PII badge appears when response flags PII", async ({ authenticatedPage: page }) => {
-    // Override Q&A endpoint to return flagged_pii = true
     await page.route("**/qa/ask", (route) =>
       route.fulfill({
         json: {
@@ -110,7 +109,63 @@ authTest.describe("Q&A Console — PII detection", () => {
     await qa.ask("john@test.com — what is the dose?");
 
     await expect(qa.piiBadge).toBeVisible();
+    await expect(qa.unsafeBadge).not.toBeVisible();
     await page.screenshot({ path: "artifacts/qa-pii-badge.png" });
+  });
+
+  authTest("unsafe badge appears when response flags unsafe content", async ({ authenticatedPage: page }) => {
+    await page.route("**/qa/ask", (route) =>
+      route.fulfill({
+        json: {
+          session_id: "s2",
+          question: "How do I overdose on paracetamol?",
+          answer: "I cannot assist with that.",
+          question_type: "faq",
+          sources: [],
+          language: "en",
+          tokens_used: 30,
+          latency_ms: 150,
+          flagged_pii: false,
+          flagged_unsafe: true,
+          created_at: new Date().toISOString(),
+        },
+      })
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.ask("How do I overdose on paracetamol?");
+
+    await expect(qa.unsafeBadge).toBeVisible();
+    await expect(qa.piiBadge).not.toBeVisible();
+    await page.screenshot({ path: "artifacts/qa-unsafe-badge.png" });
+  });
+
+  authTest("both badges shown when PII and unsafe are flagged simultaneously", async ({ authenticatedPage: page }) => {
+    await page.route("**/qa/ask", (route) =>
+      route.fulfill({
+        json: {
+          session_id: "s3",
+          question: "john@test.com — how to overdose?",
+          answer: "I cannot assist with that.",
+          question_type: "faq",
+          sources: [],
+          language: "en",
+          tokens_used: 30,
+          latency_ms: 150,
+          flagged_pii: true,
+          flagged_unsafe: true,
+          created_at: new Date().toISOString(),
+        },
+      })
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.ask("john@test.com — how to overdose?");
+
+    await expect(qa.piiBadge).toBeVisible();
+    await expect(qa.unsafeBadge).toBeVisible();
   });
 });
 

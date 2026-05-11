@@ -4,18 +4,23 @@ Search/Retrieval APIs — exposes all four search strategies directly.
 Useful for evaluating search quality or building custom retrieval workflows.
 """
 
-import time
+import re
+from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from backend.core.auth import get_current_user
 from backend.models.qa import ChunkResult
 from backend.services import search_service
 
 router = APIRouter(prefix="/search", tags=["Search APIs"])
 
+_CHUNK_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,200}$')
+
 
 @router.get("/vector", response_model=list[ChunkResult])
 async def vector_search(
+    _user: Annotated[dict, Depends(get_current_user)],
     q: str = Query(..., description="Natural language query"),
     top_k: int = Query(5, ge=1, le=20),
 ) -> list[ChunkResult]:
@@ -29,6 +34,7 @@ async def vector_search(
 
 @router.get("/keyword", response_model=list[ChunkResult])
 async def keyword_search(
+    _user: Annotated[dict, Depends(get_current_user)],
     q: str = Query(..., description="Keyword query"),
     top_k: int = Query(5, ge=1, le=20),
 ) -> list[ChunkResult]:
@@ -42,6 +48,7 @@ async def keyword_search(
 
 @router.get("/hybrid", response_model=list[ChunkResult])
 async def hybrid_search(
+    _user: Annotated[dict, Depends(get_current_user)],
     q: str = Query(..., description="Query (combined semantic + keyword)"),
     top_k: int = Query(5, ge=1, le=20),
 ) -> list[ChunkResult]:
@@ -54,6 +61,7 @@ async def hybrid_search(
 
 @router.get("/graph", response_model=list[ChunkResult])
 async def graph_search(
+    _user: Annotated[dict, Depends(get_current_user)],
     chunk_ids: str = Query(..., description="Comma-separated chunk IDs to expand"),
     top_k: int = Query(5, ge=1, le=10),
 ) -> list[ChunkResult]:
@@ -63,4 +71,7 @@ async def graph_search(
     Best for: getting surrounding context after an initial search.
     """
     ids = [cid.strip() for cid in chunk_ids.split(",") if cid.strip()]
-    return await search_service.graph_search(ids, top_k)
+    valid_ids = [cid for cid in ids if _CHUNK_ID_RE.match(cid)]
+    if not valid_ids:
+        raise HTTPException(status_code=400, detail="No valid chunk IDs provided")
+    return await search_service.graph_search(valid_ids, top_k)

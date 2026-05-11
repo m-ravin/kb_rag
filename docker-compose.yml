@@ -1,8 +1,26 @@
-# Local development stack — runs backend, frontend, and Redis together.
+# Local development stack — runs backend, frontend, Redis, and Presidio together.
 # Azure services (OpenAI, Search, Cosmos) still connect to real Azure endpoints
-# via your .env file. Only Redis runs locally in this compose setup.
+# via your .env file. Redis and Presidio run locally in this compose setup.
 
 services:
+
+  # ── PII detection service (standalone, reusable) ───────────────────────────
+  presidio-service:
+    build:
+      context: ./presidio-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      # spaCy model loading takes ~30-60 seconds on cold start — start_period covers that.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
   backend:
     build:
       context: .
@@ -13,13 +31,18 @@ services:
       - .env
     environment:
       - REDIS_CONNECTION=redis://:@redis:6379
+      - PRESIDIO_ENDPOINT=http://presidio-service:8080
       - DEBUG=true
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      presidio-service:
+        condition: service_healthy
     volumes:
       - ./backend:/app/backend  # Hot-reload in development
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
+  # ── React CMS frontend ────────────────────────────────────────────────────
   frontend:
     build:
       context: .
@@ -29,6 +52,7 @@ services:
     depends_on:
       - backend
 
+  # ── Redis cache ───────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     ports:

@@ -39,6 +39,12 @@ dependencies = [
 
     # ── HTTP client ────────────────────────────────────────────────────────────
     "httpx>=0.27.0",
+
+    # ── Validation helpers ─────────────────────────────────────────────────────
+    "email-validator>=2.1.0",   # enables pydantic EmailStr
+
+    # ── Rate limiting ──────────────────────────────────────────────────────────
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
