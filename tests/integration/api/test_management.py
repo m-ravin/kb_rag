@@ -259,3 +259,144 @@ class TestAuthentication:
             )
 
         assert response.status_code == 401
+
+
+class TestUploadValidation:
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_file_exceeding_size_limit(self, client, admin_token):
+        """Files over _MAX_UPLOAD_BYTES must be rejected with 413."""
+        mock_user = {"email": "admin@test.com", "role": "admin"}
+
+        # Patch the size cap to 10 bytes so the test doesn't need a 50 MB buffer.
+        with patch("backend.api.management.router._MAX_UPLOAD_BYTES", 10), \
+             patch("backend.api.management.router.get_current_user", return_value=mock_user), \
+             patch("backend.api.management.router.require_role", return_value=lambda: mock_user):
+
+            response = await client.post(
+                "/manage/documents/upload",
+                files={"file": ("big.pdf", b"%PDF" + b"x" * 20, "application/pdf")},
+                data={"title": "Oversized file"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_pdf_with_wrong_magic_bytes(self, client, admin_token):
+        """Content-Type application/pdf but bytes don't start with %PDF → 400."""
+        mock_user = {"email": "admin@test.com", "role": "admin"}
+
+        with patch("backend.api.management.router.get_current_user", return_value=mock_user), \
+             patch("backend.api.management.router.require_role", return_value=lambda: mock_user):
+
+            response = await client.post(
+                "/manage/documents/upload",
+                files={"file": ("evil.pdf", b"PK\x03\x04FAKECONTENT", "application/pdf")},
+                data={"title": "Spoofed PDF"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 400
+        assert "match" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_unsupported_file_type(self, client, admin_token, mock_db):
+        """Excel files (.xlsx) must be rejected with 400."""
+        mock_user = {"email": "admin@test.com", "role": "admin"}
+
+        with patch("backend.api.management.router.get_current_user", return_value=mock_user), \
+             patch("backend.api.management.router.require_role", return_value=lambda: mock_user):
+
+            response = await client.post(
+                "/manage/documents/upload",
+                files={"file": ("data.xlsx", b"fake excel", "application/vnd.ms-excel")},
+                data={"title": "Bad file"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 400
+
+
+class TestAuthRequiredOnTasksAndSearch:
+
+    @pytest.mark.asyncio
+    async def test_tasks_content_safety_requires_auth(self, client):
+        """Unauthenticated request to /tasks/content-safety must return 401."""
+        response = await client.post("/tasks/content-safety", json={"text": "hello"})
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_tasks_pii_detection_requires_auth(self, client):
+        """Unauthenticated request to /tasks/pii-detection must return 401."""
+        response = await client.post("/tasks/pii-detection", json={"text": "hello"})
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_tasks_summarizer_requires_auth(self, client):
+        """Unauthenticated request to /tasks/summarizer must return 401."""
+        response = await client.post("/tasks/summarizer", json={"text": "hello"})
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_search_vector_requires_auth(self, client):
+        """Unauthenticated request to /search/vector must return 401."""
+        response = await client.get("/search/vector", params={"q": "paracetamol"})
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_search_graph_requires_auth(self, client):
+        """Unauthenticated request to /search/graph must return 401."""
+        response = await client.get("/search/graph", params={"chunk_ids": "doc1_chunk_0"})
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_search_graph_rejects_malicious_chunk_ids(self, client, viewer_token, mock_db):
+        """Chunk IDs with injection characters must be rejected with 400."""
+        mock_user = {"email": "viewer@test.com", "role": "viewer"}
+
+        with patch("backend.api.search_apis.router.get_current_user", return_value=mock_user):
+            response = await client.get(
+                "/search/graph",
+                params={"chunk_ids": "doc1_chunk_0,'; DROP TABLE chunks; --"},
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_tasks_wording_tuning_rejects_invalid_tone(self, client, viewer_token, mock_db):
+        """tone not in allowlist must return 400."""
+        mock_user = {"email": "viewer@test.com", "role": "viewer"}
+
+        with patch("backend.api.task_apis.router.get_current_user", return_value=mock_user):
+            response = await client.post(
+                "/tasks/wording-tuning",
+                json={"text": "hello world", "options": {"tone": "aggressive"}},
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_tasks_summarizer_rejects_max_sentences_out_of_range(self, client, viewer_token):
+        """max_sentences=0 must return 400."""
+        mock_user = {"email": "viewer@test.com", "role": "viewer"}
+
+        with patch("backend.api.task_apis.router.get_current_user", return_value=mock_user):
+            response = await client.post(
+                "/tasks/summarizer",
+                json={"text": "Long text. " * 50, "options": {"max_sentences": 0}},
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_ask_rejects_invalid_language_code(self, client):
+        """language not in the allowlist must return 422."""
+        response = await client.post(
+            "/qa/ask",
+            json={"question": "What is the dose?", "language": "klingon"},
+        )
+        assert response.status_code == 422

@@ -44,16 +44,22 @@ def _cache_key(strategy: str, query: str, top_k: int) -> str:
 
 
 async def _try_cache(key: str) -> list[ChunkResult] | None:
-    redis = get_redis_client()
-    cached = await redis.get(key)
-    if cached:
-        return [ChunkResult(**c) for c in json.loads(cached)]
+    try:
+        redis = get_redis_client()
+        cached = await redis.get(key)
+        if cached:
+            return [ChunkResult(**c) for c in json.loads(cached)]
+    except Exception as exc:
+        logger.warning("Cache read failed — continuing without cache: %s", exc)
     return None
 
 
 async def _write_cache(key: str, results: list[ChunkResult]) -> None:
-    redis = get_redis_client()
-    await redis.setex(key, CACHE_TTL_SECONDS, json.dumps([r.model_dump() for r in results]))
+    try:
+        redis = get_redis_client()
+        await redis.setex(key, CACHE_TTL_SECONDS, json.dumps([r.model_dump() for r in results]))
+    except Exception as exc:
+        logger.warning("Cache write failed — result not cached: %s", exc)
 
 
 async def vector_search(query: str, top_k: int = 5) -> list[ChunkResult]:

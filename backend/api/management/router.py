@@ -71,7 +71,9 @@ async def login(request: Request, form: Annotated[OAuth2PasswordRequestForm, Dep
 
 
 @router.post("/auth/register")
+@limiter.limit("10/minute")
 async def register(
+    request: Request,
     body: RegisterRequest,
     _admin: Annotated[dict, Depends(require_role("admin"))],
 ) -> dict:
@@ -227,11 +229,14 @@ async def delete_document(
     except Exception as exc:
         logger.warning("Blob delete failed for %s: %s", document_id, exc)
 
-    # 3. Delete all search index chunks belonging to this document
+    # 3. Delete all search index chunks belonging to this document.
+    # Track deleted IDs to avoid infinite loops: Azure Search is eventually consistent
+    # and can return the same IDs in the next query until the index refreshes.
     try:
         search_client = get_search_client()
-        # Paginate in case the document produced more than 1000 chunks
-        while True:
+        deleted_ids: set[str] = set()
+        max_iterations = 20  # safety cap
+        for _ in range(max_iterations):
             chunk_ids = []
             async for r in await search_client.search(
                 search_text="*",
@@ -239,12 +244,16 @@ async def delete_document(
                 select=["id"],
                 top=1000,
             ):
-                chunk_ids.append({"id": r["id"]})
+                if r["id"] not in deleted_ids:
+                    chunk_ids.append({"id": r["id"]})
             if not chunk_ids:
                 break
             await search_client.delete_documents(documents=chunk_ids)
+            deleted_ids.update(c["id"] for c in chunk_ids)
             if len(chunk_ids) < 1000:
                 break
+        else:
+            logger.warning("Search cleanup hit iteration cap for %s — index may have stale chunks", document_id)
     except Exception as exc:
         logger.warning("Search index cleanup failed for %s: %s", document_id, exc)
 
@@ -295,16 +304,19 @@ async def get_metrics(
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 async def _log_activity(db, action: str, document_id: str, user_email: str, details: dict) -> None:
-    await db["activity_logs"].insert_one(
-        {
-            "log_id": str(uuid.uuid4()),
-            "action": action,
-            "document_id": document_id,
-            "user_email": user_email,
-            "details": details,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    try:
+        await db["activity_logs"].insert_one(
+            {
+                "log_id": str(uuid.uuid4()),
+                "action": action,
+                "document_id": document_id,
+                "user_email": user_email,
+                "details": details,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.warning("Activity log write failed for %s/%s: %s", action, document_id, exc)
 
 
 def _drop_gremlin_vertices_sync(document_id: str, s) -> None:

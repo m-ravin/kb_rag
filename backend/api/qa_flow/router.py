@@ -38,11 +38,11 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     t_start = time.monotonic()
     session_id = request.session_id or str(uuid.uuid4())
 
-    # ── Step 1: Detect and mask PII before anything else ─────────────────────
-    # has_pii tells the caller PII was present; safe_question is what we process.
-    # Raw PII never reaches the LLM or the log store.
-    has_pii, _ = await safety_service.detect_pii(request.question)
-    safe_question = await safety_service.mask_pii(request.question) if has_pii else request.question
+    # ── Step 1: Detect and mask PII in a single Presidio call ────────────────
+    # screen_pii calls /redact once so has_pii and safe_question come from the
+    # same response. Calling detect_pii + mask_pii separately would make two
+    # round-trips and allow a race on a flapping Presidio service (see ADR-0011).
+    has_pii, _, safe_question = await safety_service.screen_pii(request.question)
 
     # ── Step 2: Check the safe question for harmful content ───────────────────
     is_safe, unsafe_category = await safety_service.check_content_safety(safe_question)

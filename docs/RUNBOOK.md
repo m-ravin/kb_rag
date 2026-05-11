@@ -57,7 +57,7 @@ kubectl rollout status deployment/kb-rag-backend --namespace kb-rag
 |----------|----------|---------|
 | `GET /health` (backend, port 8000) | `{"status": "healthy"}` | FastAPI server is up |
 | `GET /ready` (backend, port 8000) | `{"status": "ready"}` | Redis connection verified |
-| `GET /health` (presidio-service, port 8080) | `{"status": "ok"}` | Presidio + spaCy model loaded |
+| `GET /health` (presidio-service, port 8080) | `{"status": "healthy"}` | Presidio + spaCy model loaded |
 | `kubectl get pods -n kb-rag` | All pods `Running` | AKS workloads healthy |
 
 ```bash
@@ -169,7 +169,7 @@ az functionapp logs show --name func-doc-proc-kb-prod --resource-group rg-kb-pro
 
 ### Presidio service not healthy
 
-**Symptoms**: Backend logs show `WARNING Presidio /redact unreachable` or `/analyze unreachable`. PII is not masked (fail-open — the question still goes to the LLM with PII intact).
+**Symptoms**: Backend logs show `ERROR Presidio /redact unreachable` or `/analyze unreachable`. Q&A requests return HTTP 503 — the pipeline is blocked (fail-closed). PII cannot reach the LLM while Presidio is down; see ADR-0011 for the rationale.
 
 **Check service health**:
 ```bash

@@ -269,15 +269,14 @@ def _build_chunk_graph(chunks: list[dict], document_id: str) -> None:
     Uses Gremlin parameter bindings to prevent query injection.
     Graph building is best-effort — failure does not abort the pipeline.
     """
+    gremlin = gremlin_client.Client(
+        os.environ["COSMOS_GREMLIN_ENDPOINT"],
+        "g",
+        username="/dbs/pil-graph/colls/chunk-graph",
+        password=os.environ["COSMOS_GREMLIN_KEY"],
+        message_serializer=serializer.GraphSONSerializersV2d0(),
+    )
     try:
-        gremlin = gremlin_client.Client(
-            os.environ["COSMOS_GREMLIN_ENDPOINT"],
-            "g",
-            username="/dbs/pil-graph/colls/chunk-graph",
-            password=os.environ["COSMOS_GREMLIN_KEY"],
-            message_serializer=serializer.GraphSONSerializersV2d0(),
-        )
-
         for chunk in chunks:
             vertex_id = f"{document_id}_chunk_{chunk['chunk_index']}"
 
@@ -302,11 +301,12 @@ def _build_chunk_graph(chunks: list[dict], document_id: str) -> None:
                     {"prev_id": prev_id, "curr_id": vertex_id},
                 ).all().result()
 
-        gremlin.close()
         logger.info("Built chunk graph for %s (%d nodes)", document_id, len(chunks))
 
     except Exception as exc:
         logger.warning("Graph build failed for %s: %s", document_id, exc)
+    finally:
+        gremlin.close()
 
 
 # ── Helpers: MongoDB status updates ──────────────────────────────────────────

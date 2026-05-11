@@ -74,7 +74,9 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    app.add_middleware(SecurityHeadersMiddleware)
+    # Starlette processes middleware in reverse registration order (last-added = outermost).
+    # CORS must be added first so SecurityHeaders runs outside it and applies to all responses
+    # including CORS preflight OPTIONS replies.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.allowed_origins,
@@ -82,6 +84,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(qa_router)
     app.include_router(task_router)
@@ -96,9 +99,13 @@ def create_app() -> FastAPI:
     @app.get("/ready", tags=["Health"])
     async def readiness() -> dict:
         """Kubernetes readiness probe — verifies critical dependencies."""
+        from fastapi import HTTPException
         from backend.core.clients import get_redis_client
-        redis = get_redis_client()
-        await redis.ping()
+        try:
+            redis = get_redis_client()
+            await redis.ping()
+        except Exception:
+            raise HTTPException(status_code=503, detail="Redis unavailable")
         return {"status": "ready"}
 
     return app

@@ -175,8 +175,10 @@ def anonymize(req: AnonymizeRequest) -> AnonymizeResponse:
     ]
 
     try:
+        # Truncate to the same 5000-char limit used by /analyze so that
+        # offset positions in analyzer_results are valid for this text slice.
         result = _anonymizer.anonymize(
-            text=req.text, analyzer_results=recognizer_results
+            text=req.text[:5000], analyzer_results=recognizer_results
         )
     except Exception as exc:
         logger.exception("Anonymizer error: %s", exc)

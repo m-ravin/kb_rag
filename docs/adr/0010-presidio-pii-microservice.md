@@ -88,10 +88,11 @@ The Kubernetes deployment will run it as a ClusterIP service (not exposed extern
   out degrades the Q&A endpoint
 
 ### Risks
-- **Availability**: `safety_service.py` catches all exceptions from the Presidio
-  endpoints and logs warnings. On `/redact` failure, `mask_pii` returns the original
-  text unchanged (fail-open) to avoid blocking the Q&A pipeline; callers should alert
-  on repeated warnings. For production, run ≥2 Presidio replicas.
+- **Availability**: `safety_service.py` uses a **fail-closed** policy (superseding the
+  original fail-open design documented here). On any Presidio failure, `detect_pii`
+  returns `(True, ["UNKNOWN"])` and `mask_pii` raises HTTP 503 — blocking the Q&A
+  pipeline rather than passing raw PII to the LLM. See ADR-0011 for the rationale and
+  alternatives considered. For production, run ≥2 Presidio replicas to minimise 503s.
 - **Not externally accessible**: The service must be on the internal Kubernetes network
   (ClusterIP). Exposing it via Ingress would allow anyone to submit text for PII
   scanning at our cost.

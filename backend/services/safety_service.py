@@ -22,9 +22,9 @@ async def detect_pii(text: str) -> tuple[bool, list[str]]:
     Calls the Presidio service /analyze endpoint to detect PII entity types.
     Returns (has_pii, list_of_entity_types).
 
-    On any connectivity failure the function logs a warning and returns (False, [])
-    so a transient Presidio outage does not block Q&A entirely — but callers should
-    treat a repeated False as a potential signal that the service is down.
+    FAIL-CLOSED: on any connectivity failure returns (True, ["UNKNOWN"]) so the
+    caller proceeds to call mask_pii, which will raise HTTP 503 if Presidio is
+    still down. Raw PII never reaches the LLM — see ADR-0011.
     """
     s = get_settings()
     try:
@@ -42,12 +42,44 @@ async def detect_pii(text: str) -> tuple[bool, list[str]]:
         return True, ["UNKNOWN"]
 
 
+async def screen_pii(text: str) -> tuple[bool, list[str], str]:
+    """
+    Detects and masks PII in a single Presidio /redact call.
+    Returns (has_pii, entity_types, masked_text).
+
+    Use this in the Q&A pipeline instead of calling detect_pii + mask_pii
+    separately — two round-trips allow a race on a flapping service where
+    /analyze returns the fail-closed sentinel but /redact then succeeds with
+    no entities found, silently returning unmasked text.
+
+    FAIL-CLOSED: raises HTTP 503 on any connectivity failure.
+    """
+    s = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(
+                f"{s.presidio_endpoint}/redact",
+                json={"text": text[:5000], "language": "en"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["has_pii"], data["entities_found"], data["redacted_text"]
+    except Exception as exc:
+        logger.error("Presidio /redact unreachable — blocking request: %s", exc)
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="PII screening service temporarily unavailable. Please try again shortly.",
+        )
+
+
 async def mask_pii(text: str) -> str:
     """
     Calls the Presidio service /redact endpoint to replace all PII with [REDACTED].
     Call this before sending user input to the LLM or storing it in logs.
 
-    On failure returns the original text unchanged and logs a warning.
+    FAIL-CLOSED: raises HTTP 503 on any connectivity failure so the Q&A pipeline
+    is blocked rather than passing raw PII to the LLM — see ADR-0011.
     """
     s = get_settings()
     try:
