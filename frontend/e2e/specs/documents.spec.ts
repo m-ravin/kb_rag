@@ -117,7 +117,6 @@ authTest.describe("Document upload", () => {
     expect(uploadCalled).toBe(true);
     await page.screenshot({ path: "artifacts/upload-success.png" });
   });
-});
 
   authTest("uploading a DOCX file calls the upload API", async ({ authenticatedPage: page }) => {
     let uploadCalled = false;
