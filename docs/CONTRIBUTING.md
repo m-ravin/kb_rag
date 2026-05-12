@@ -20,6 +20,7 @@ cd kb_rag
 
 # 2. Copy and fill in environment variables
 cp .env.example .env
+# Edit .env — set JWT_SECRET and all Azure connection strings
 
 # 3. Install backend dependencies
 uv sync --dev
@@ -27,7 +28,8 @@ uv sync --dev
 # 4. Install frontend dependencies
 cd frontend && npm install && cd ..
 
-# 5. Start local stack (Redis runs in Docker; backend + frontend hot-reload)
+# 5. Start local stack — builds Presidio image (includes spaCy model download, ~5 min first time)
+#    then starts Redis, Presidio service, backend, and frontend together.
 docker-compose up
 ```
 
@@ -72,10 +74,12 @@ See [ADR-0007](adr/0007-tdd-80-percent-coverage.md) for the rationale.
 | Command | Description |
 |---------|-------------|
 | `npm run dev` | Dev server (port 3000) |
-| `npm run build` | Production build |
+| `npm run build` | Production build with TypeScript check |
+| `npm run preview` | Preview production build locally (port 4173) |
 | `npm run lint` | ESLint |
 | `npm run test:e2e` | Playwright E2E headless |
 | `npm run test:e2e:ui` | Playwright interactive UI |
+| `npm run test:e2e:report` | Open last HTML test report |
 
 ## Testing
 
@@ -128,7 +132,7 @@ Before opening a PR:
 - [ ] Tests written for new code (TDD — tests first)
 - [ ] `uv run pytest --cov=backend` passes with 80%+ coverage
 - [ ] `uv run ruff check backend/` returns no errors
-- [ ] No hardcoded secrets, PIL-specific language, or `print()` statements
+- [ ] No hardcoded secrets, `print()` statements, or bare `except Exception:` blocks
 - [ ] PR description explains *why* (not just *what*)
 - [ ] ADR created if an architectural decision was made (`docs/adr/`)
 

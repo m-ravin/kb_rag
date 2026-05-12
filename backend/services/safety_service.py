@@ -3,10 +3,12 @@ Safety Service — PII detection and content safety screening.
 
 Every question and answer passes through here before being processed or returned.
 Like a security guard who checks everyone entering or leaving a building.
+
+PII detection delegates to the standalone Presidio microservice (presidio-service).
+No PII analysis runs in-process — the microservice can be called by any platform service.
 """
 
 import logging
-import re
 
 import httpx
 
@@ -14,67 +16,87 @@ from backend.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Regex patterns for local PII detection fallback
-_PII_PATTERNS = [
-    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                        # US SSN
-    re.compile(r"\b[A-Z]{1,2}\d{6,9}[A-Z]?\b"),                  # Passport
-    re.compile(r"\b\d{6}-\d{2}-\d{4}\b"),                        # MY NRIC with dashes (870315-07-1234)
-    re.compile(r"\b\d{12}\b"),                                    # MY NRIC without dashes (870315071234)
-    re.compile(r"\b\+?[\d\s\-]{8,15}\b"),                        # Phone numbers
-    re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),  # Email
-]
-
-
-def mask_pii(text: str) -> str:
-    """
-    Replaces every PII match with a [REDACTED] token.
-    Call this before sending user input to the LLM or storing it in logs.
-    The original question is preserved only in the response flag (flagged_pii=True)
-    so callers know masking occurred, without storing the raw PII.
-    """
-    masked = text
-    for pattern in _PII_PATTERNS:
-        masked = pattern.sub("[REDACTED]", masked)
-    return masked
-
 
 async def detect_pii(text: str) -> tuple[bool, list[str]]:
     """
-    Checks whether the text contains personally identifiable information.
-    Returns (has_pii, list_of_detected_types).
+    Calls the Presidio service /analyze endpoint to detect PII entity types.
+    Returns (has_pii, list_of_entity_types).
 
-    Uses Azure AI Language if configured, falls back to regex patterns.
-    Like a paper shredder that beeps whenever it detects a secret.
+    FAIL-CLOSED: on any connectivity failure returns (True, ["UNKNOWN"]) so the
+    caller proceeds to call mask_pii, which will raise HTTP 503 if Presidio is
+    still down. Raw PII never reaches the LLM — see ADR-0011.
     """
     s = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(
+                f"{s.presidio_endpoint}/analyze",
+                json={"text": text[:5000], "language": "en"},
+            )
+            resp.raise_for_status()
+            results = resp.json()
+            entity_types = list({r["entity_type"] for r in results})
+            return bool(results), entity_types
+    except Exception as exc:
+        logger.error("Presidio /analyze unreachable — assuming PII present: %s", exc)
+        return True, ["UNKNOWN"]
 
-    # Try Azure AI Language PII endpoint if configured
-    if s.content_safety_endpoint and s.content_safety_key:
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as http:
-                resp = await http.post(
-                    f"{s.content_safety_endpoint}/language/analyze-text/jobs",
-                    headers={
-                        "Ocp-Apim-Subscription-Key": s.content_safety_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "tasks": [{"kind": "PiiEntityRecognition", "parameters": {"domain": "phi"}}],
-                        "analysisInput": {"documents": [{"id": "1", "language": "en", "text": text[:5000]}]},
-                    },
-                )
-                if resp.status_code == 202:
-                    return False, []  # Async job — treat as safe for now
-        except Exception as exc:
-            logger.debug("Azure PII endpoint unavailable, falling back to regex: %s", exc)
 
-    # Regex fallback
-    detected = []
-    for pattern in _PII_PATTERNS:
-        if pattern.search(text):
-            detected.append(pattern.pattern)
+async def screen_pii(text: str) -> tuple[bool, list[str], str]:
+    """
+    Detects and masks PII in a single Presidio /redact call.
+    Returns (has_pii, entity_types, masked_text).
 
-    return bool(detected), detected
+    Use this in the Q&A pipeline instead of calling detect_pii + mask_pii
+    separately — two round-trips allow a race on a flapping service where
+    /analyze returns the fail-closed sentinel but /redact then succeeds with
+    no entities found, silently returning unmasked text.
+
+    FAIL-CLOSED: raises HTTP 503 on any connectivity failure.
+    """
+    s = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(
+                f"{s.presidio_endpoint}/redact",
+                json={"text": text[:5000], "language": "en"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["has_pii"], data["entities_found"], data["redacted_text"]
+    except Exception as exc:
+        logger.error("Presidio /redact unreachable — blocking request: %s", exc)
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="PII screening service temporarily unavailable. Please try again shortly.",
+        )
+
+
+async def mask_pii(text: str) -> str:
+    """
+    Calls the Presidio service /redact endpoint to replace all PII with [REDACTED].
+    Call this before sending user input to the LLM or storing it in logs.
+
+    FAIL-CLOSED: raises HTTP 503 on any connectivity failure so the Q&A pipeline
+    is blocked rather than passing raw PII to the LLM — see ADR-0011.
+    """
+    s = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(
+                f"{s.presidio_endpoint}/redact",
+                json={"text": text[:5000], "language": "en"},
+            )
+            resp.raise_for_status()
+            return resp.json()["redacted_text"]
+    except Exception as exc:
+        logger.error("Presidio /redact unreachable — blocking request: %s", exc)
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="PII screening service temporarily unavailable. Please try again shortly.",
+        )
 
 
 async def check_content_safety(text: str) -> tuple[bool, str]:

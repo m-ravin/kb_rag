@@ -4,6 +4,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -18,7 +20,7 @@ class QuestionType(str, Enum):
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     session_id: str | None = None
-    language: str = "en"
+    language: Literal["en", "ms", "zh", "ta", "fr", "de", "es", "ar", "pt", "id"] = "en"
     max_chunks: int = Field(default=5, ge=1, le=20)
 
 

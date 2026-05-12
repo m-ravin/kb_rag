@@ -8,15 +8,19 @@ Think of it as a smart librarian who can find books in four ways:
 4. Hybrid: combines all three for the best results
 """
 
+import asyncio
 import hashlib
 import json
 import logging
+import re
 
 from azure.search.documents.models import VectorizedQuery
 
 from backend.core.clients import get_openai_client, get_redis_client, get_search_client
 from backend.core.config import get_settings
 from backend.models.qa import ChunkResult
+
+_CHUNK_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,200}$')
 
 logger = logging.getLogger(__name__)
 
@@ -35,21 +39,27 @@ async def _get_embedding(text: str) -> list[float]:
 
 
 def _cache_key(strategy: str, query: str, top_k: int) -> str:
-    digest = hashlib.md5(f"{strategy}:{query}:{top_k}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{strategy}:{query}:{top_k}".encode()).hexdigest()
     return f"search:{digest}"
 
 
 async def _try_cache(key: str) -> list[ChunkResult] | None:
-    redis = get_redis_client()
-    cached = await redis.get(key)
-    if cached:
-        return [ChunkResult(**c) for c in json.loads(cached)]
+    try:
+        redis = get_redis_client()
+        cached = await redis.get(key)
+        if cached:
+            return [ChunkResult(**c) for c in json.loads(cached)]
+    except Exception as exc:
+        logger.warning("Cache read failed — continuing without cache: %s", exc)
     return None
 
 
 async def _write_cache(key: str, results: list[ChunkResult]) -> None:
-    redis = get_redis_client()
-    await redis.setex(key, CACHE_TTL_SECONDS, json.dumps([r.model_dump() for r in results]))
+    try:
+        redis = get_redis_client()
+        await redis.setex(key, CACHE_TTL_SECONDS, json.dumps([r.model_dump() for r in results]))
+    except Exception as exc:
+        logger.warning("Cache write failed — result not cached: %s", exc)
 
 
 async def vector_search(query: str, top_k: int = 5) -> list[ChunkResult]:
@@ -123,8 +133,10 @@ async def keyword_search(query: str, top_k: int = 5) -> list[ChunkResult]:
 
 async def hybrid_search(query: str, top_k: int = 5) -> list[ChunkResult]:
     """
-    Combines vector + keyword search using Reciprocal Rank Fusion (RRF).
-    Gives the best of both worlds: meaning-based AND keyword-based matching.
+    Combines vector + keyword search in a single Azure AI Search request.
+    Azure fuses the two result sets using its built-in hybrid ranking mode
+    (similar to RRF). Full semantic RRF requires a semantic configuration —
+    add SemanticConfiguration + query_type=SEMANTIC to unlock that tier.
     """
     cache_key = _cache_key("hybrid", query, top_k)
     if cached := await _try_cache(cache_key):
@@ -164,33 +176,28 @@ async def graph_search(seed_chunk_ids: list[str], top_k: int = 5) -> list[ChunkR
     """
     Expands a set of seed chunks by following the 'nextChunk' graph edges
     in Cosmos Gremlin — returns neighbouring context chunks.
-    """
-    from gremlin_python.driver import client as gremlin_client_lib
-    from gremlin_python.driver import serializer
 
+    Gremlin Python is a synchronous blocking client, so the traversal runs
+    inside asyncio.to_thread to avoid blocking the event loop.
+    """
     s = get_settings()
-    gremlin = gremlin_client_lib.Client(
-        s.cosmos_gremlin_endpoint,
-        "g",
-        username=f"/dbs/{s.cosmos_gremlin_database}/colls/{s.cosmos_gremlin_graph}",
-        password=s.cosmos_gremlin_key,
-        message_serializer=serializer.GraphSONSerializersV2d0(),
+
+    # Run the blocking Gremlin traversal in a thread pool
+    neighbour_ids: set[str] = await asyncio.to_thread(
+        _gremlin_neighbors_sync, seed_chunk_ids[:3], top_k, s
     )
 
-    neighbour_ids: set[str] = set()
-    for chunk_id in seed_chunk_ids[:3]:  # Limit graph traversal to top-3 seeds
-        query = f"g.V('{chunk_id}').both('nextChunk').limit({top_k}).values('id')"
-        result = gremlin.submit(query).all().result()
-        neighbour_ids.update(result)
-
-    gremlin.close()
-
-    # Fetch actual content for neighbour chunk IDs from Azure AI Search
     if not neighbour_ids:
         return []
 
+    # Fetch actual content for neighbour chunk IDs from Azure AI Search.
+    # Validate IDs before building the OData filter to prevent injection.
+    safe_ids = [cid for cid in list(neighbour_ids)[:top_k] if _CHUNK_ID_RE.match(cid)]
+    if not safe_ids:
+        return []
+
     search_client = get_search_client()
-    filter_expr = " or ".join(f"id eq '{cid}'" for cid in list(neighbour_ids)[:top_k])
+    filter_expr = " or ".join(f"id eq '{cid}'" for cid in safe_ids)
     results = []
     async for r in await search_client.search(
         search_text="*",
@@ -208,3 +215,33 @@ async def graph_search(seed_chunk_ids: list[str], top_k: int = 5) -> list[ChunkR
         )
 
     return results
+
+
+def _gremlin_neighbors_sync(
+    seed_ids: list[str], top_k: int, s
+) -> set[str]:
+    """
+    Synchronous Gremlin traversal — called via asyncio.to_thread.
+    Uses Gremlin parameter bindings to prevent query injection.
+    """
+    from gremlin_python.driver import client as gremlin_client_lib
+    from gremlin_python.driver import serializer
+
+    gremlin = gremlin_client_lib.Client(
+        s.cosmos_gremlin_endpoint,
+        "g",
+        username=f"/dbs/{s.cosmos_gremlin_database}/colls/{s.cosmos_gremlin_graph}",
+        password=s.cosmos_gremlin_key,
+        message_serializer=serializer.GraphSONSerializersV2d0(),
+    )
+    try:
+        neighbour_ids: set[str] = set()
+        for chunk_id in seed_ids:
+            result = gremlin.submit(
+                "g.V(seed_id).both('nextChunk').limit(top_k).values('id')",
+                {"seed_id": chunk_id, "top_k": top_k},
+            ).all().result()
+            neighbour_ids.update(result)
+        return neighbour_ids
+    finally:
+        gremlin.close()

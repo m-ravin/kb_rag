@@ -63,6 +63,11 @@ test.describe("Authentication", () => {
     await expect(page).toHaveURL(/\/login/, { timeout: 5_000 });
   });
 
+  test("unauthenticated user is redirected from /qa-test to /login", async ({ page }) => {
+    await page.goto("/qa-test");
+    await expect(page).toHaveURL(/\/login/, { timeout: 5_000 });
+  });
+
   test("logout clears session and redirects to /login", async ({ page }) => {
     await mockBackend(page);
     await page.goto("/login");

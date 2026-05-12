@@ -13,11 +13,11 @@ interface Metrics {
   unsafe_flagged_count: number;
 }
 
-function StatCard({ label, value, icon: Icon, color }: {
-  label: string; value: string | number; icon: React.ElementType; color: string;
+function StatCard({ label, value, icon: Icon, color, 'data-testid': testId }: {
+  label: string; value: string | number; icon: React.ElementType; color: string; 'data-testid'?: string;
 }) {
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-center gap-4">
+    <div data-testid={testId} className="bg-white rounded-xl border border-gray-200 p-5 flex items-center gap-4">
       <div className={`p-3 rounded-lg ${color}`}>
         <Icon size={20} className="text-white" />
       </div>
@@ -63,24 +63,28 @@ export default function Dashboard() {
               value={metrics.total_questions.toLocaleString()}
               icon={MessageSquare}
               color="bg-blue-500"
+              data-testid="stat-total-questions"
             />
             <StatCard
               label="Avg Latency (ms)"
               value={Math.round(metrics.avg_latency_ms).toLocaleString()}
               icon={Zap}
               color="bg-green-500"
+              data-testid="stat-avg-latency"
             />
             <StatCard
               label="PII Flags"
               value={metrics.pii_flagged_count}
               icon={AlertTriangle}
               color="bg-yellow-500"
+              data-testid="stat-pii-flags"
             />
             <StatCard
               label="Tokens Used"
               value={metrics.total_tokens.toLocaleString()}
               icon={Activity}
               color="bg-purple-500"
+              data-testid="stat-tokens"
             />
           </div>
 
@@ -98,7 +102,7 @@ export default function Dashboard() {
           </div>
         </>
       ) : (
-        <p className="text-red-400">Failed to load metrics.</p>
+        <p data-testid="metrics-error" className="text-red-400">Failed to load metrics.</p>
       )}
     </div>
   );

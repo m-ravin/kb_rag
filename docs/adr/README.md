@@ -16,3 +16,6 @@ Each ADR explains *what* was decided, *why*, and what alternatives were rejected
 | [0007](0007-tdd-80-percent-coverage.md) | TDD workflow with 80% coverage threshold enforced by CI | accepted | 2026-05-07 |
 | [0008](0008-llm-gateway.md) | LLM gateway — direct Azure OpenAI v1, LiteLLM sidecar planned for v2 | accepted | 2026-05-07 |
 | [0009](0009-accuracy-evaluation.md) | LLM accuracy evaluation — RAGAS framework deferred to v2 (gap acknowledged) | proposed | 2026-05-07 |
+| [0010](0010-presidio-pii-microservice.md) | Presidio PII detection — standalone microservice instead of in-process library | accepted | 2026-05-11 |
+| [0011](0011-pii-fail-closed-policy.md) | PII fail-closed policy — block Q&A on Presidio outage rather than pass raw PII | accepted | 2026-05-11 |
+| [0012](0012-security-hardening.md) | Security hardening — rate limiting, auth scope, JWT hardening, upload validation | accepted | 2026-05-11 |

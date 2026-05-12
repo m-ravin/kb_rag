@@ -44,12 +44,17 @@ class Settings(BaseSettings):
     # ── Azure Monitor / App Insights ──────────────────────────────────────────
     appinsights_connection_string: str = ""
 
+    # ── Presidio PII Service ──────────────────────────────────────────────────
+    presidio_endpoint: str = "http://presidio-service:8080"
+
     # ── Application ───────────────────────────────────────────────────────────
     app_name: str = "kb-rag RAG Backend"
     debug: bool = False
-    jwt_secret: str = "change-me-in-production"
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 480
+    # No default — pydantic raises ValidationError at startup if JWT_SECRET is absent.
+    jwt_secret: str
+    jwt_expire_minutes: int = 60
+    # Comma-separated list of allowed CORS origins, e.g. "http://localhost:3000,https://app.example.com"
+    allowed_origins: list[str] = ["http://localhost:3000"]
 
     class Config:
         env_file = ".env"

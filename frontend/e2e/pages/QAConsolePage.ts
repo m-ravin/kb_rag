@@ -9,6 +9,7 @@ export class QAConsolePage {
   readonly sourcesCard: Locator;
   readonly errorMessage: Locator;
   readonly piiBadge: Locator;
+  readonly unsafeBadge: Locator;
 
   constructor(private page: Page) {
     this.questionInput  = page.locator('[data-testid="question-input"]');
@@ -19,6 +20,7 @@ export class QAConsolePage {
     this.sourcesCard    = page.locator('[data-testid="sources-card"]');
     this.errorMessage   = page.locator('[data-testid="qa-error"]');
     this.piiBadge       = page.locator('[data-testid="pii-badge"]');
+    this.unsafeBadge    = page.locator('[data-testid="unsafe-badge"]');
   }
 
   async goto() {

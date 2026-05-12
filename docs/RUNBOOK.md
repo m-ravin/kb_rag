@@ -55,8 +55,9 @@ kubectl rollout status deployment/kb-rag-backend --namespace kb-rag
 
 | Endpoint | Expected | Meaning |
 |----------|----------|---------|
-| `GET /health` | `{"status": "healthy"}` | FastAPI server is up |
-| `GET /ready` | `{"status": "ready"}` | Redis connection verified |
+| `GET /health` (backend, port 8000) | `{"status": "healthy"}` | FastAPI server is up |
+| `GET /ready` (backend, port 8000) | `{"status": "ready"}` | Redis connection verified |
+| `GET /health` (presidio-service, port 8080) | `{"status": "healthy"}` | Presidio + spaCy model loaded |
 | `kubectl get pods -n kb-rag` | All pods `Running` | AKS workloads healthy |
 
 ```bash
@@ -118,12 +119,21 @@ The CMS Dashboard (`/dashboard`) shows live metrics pulled from Cosmos MongoDB:
 kubectl describe pod -n kb-rag -l app=kb-rag-backend
 ```
 
-**Cause**: Missing secrets. The pod requires `kb-rag-secrets` Kubernetes Secret.
+**Cause A**: Missing secrets. The pod requires `kb-rag-secrets` Kubernetes Secret including `JWT_SECRET` (app refuses to start if unset).
 
 **Fix**: Re-run the `sync-secrets` job manually:
 ```bash
 gh workflow run deploy.yml --repo m-ravin/kb_rag
 ```
+
+**Cause B**: `presidio-service` container is not healthy — backend starts before Presidio is ready.
+
+**Fix**: The backend `depends_on` a healthy Presidio container. If the presidio-service pod crashes, restart it:
+```bash
+kubectl rollout restart deployment/presidio-service -n kb-rag
+kubectl rollout status deployment/presidio-service -n kb-rag
+```
+The spaCy model (`en_core_web_lg`) is baked into the `presidio-service` Docker image at build time — no manual download needed. Allow up to 90 seconds for the container to pass its health check after a cold start.
 
 ### Search returning no results
 
@@ -141,7 +151,7 @@ az search index list \
 
 ### Document stuck in "processing" status
 
-**Cause**: Azure Function timed out (5-min limit on Consumption plan) for very large documents.
+**Cause A**: Azure Function timed out (5-min limit on Consumption plan) for very large documents.
 
 **Fix**:
 1. Check Function App logs in Azure Portal → Function App → Monitor
@@ -152,6 +162,40 @@ az search index list \
 # Check function invocations
 az functionapp logs show --name func-doc-proc-kb-prod --resource-group rg-kb-prod
 ```
+
+**Cause B**: Magic-byte validation rejected the file (content doesn't match declared extension).
+
+**Fix**: Re-upload the file in its true format (e.g. a `.docx` saved as `.pdf` will be rejected).
+
+### Presidio service not healthy
+
+**Symptoms**: Backend logs show `ERROR Presidio /redact unreachable` or `/analyze unreachable`. Q&A requests return HTTP 503 — the pipeline is blocked (fail-closed). PII cannot reach the LLM while Presidio is down; see ADR-0011 for the rationale.
+
+**Check service health**:
+```bash
+# In Docker Compose (local dev)
+curl http://localhost:8080/health
+
+# On AKS
+kubectl exec -n kb-rag -it $(kubectl get pod -n kb-rag -l app=presidio-service -o name | head -1) \
+  -- curl http://localhost:8080/health
+```
+
+**Cause A**: Container is still loading the spaCy model (takes 30–90 seconds).
+**Fix**: Wait for the health check to pass. Docker Compose will not start the backend until Presidio is healthy (`start_period: 90s`).
+
+**Cause B**: OOM-killed — the spaCy model needs ~700 MB RAM.
+**Fix**: Ensure the Presidio pod has at least 1 GB memory limit:
+```yaml
+resources:
+  requests:
+    memory: "700Mi"
+  limits:
+    memory: "1Gi"
+```
+
+**Cause C**: Image not built with the spaCy model inside.
+**Fix**: Rebuild the image from `presidio-service/Dockerfile` — the `RUN python -m spacy download en_core_web_lg` layer bakes the model in at build time.
 
 ### Redis cache not working
 

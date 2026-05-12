@@ -84,6 +84,11 @@ export default function QATest() {
                   <AlertTriangle size={11} /> PII Detected in question
                 </span>
               )}
+              {response.flagged_unsafe && (
+                <span data-testid="unsafe-badge" className="flex items-center gap-1 text-xs text-red-600 bg-red-50 px-2 py-0.5 rounded">
+                  <AlertTriangle size={11} /> Unsafe Content Flagged
+                </span>
+              )}
             </div>
             <p data-testid="answer-text" className="text-gray-800 leading-relaxed text-sm whitespace-pre-wrap">
               {response.answer}

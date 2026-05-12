@@ -48,6 +48,25 @@ authTest.describe("Document list", () => {
   });
 });
 
+authTest.describe("Document list — empty state", () => {
+  authTest("shows empty state message when no documents exist", async ({ authenticatedPage: page }) => {
+    await page.route("**/manage/documents**", (route) => {
+      if (route.request().method() === "GET") {
+        route.fulfill({ json: { documents: [], total: 0, page: 1, limit: 20 } });
+      } else {
+        route.continue();
+      }
+    });
+
+    const docs = new DocumentsPage(page);
+    await docs.goto();
+
+    expect(await docs.getDocumentCount()).toBe(0);
+    await expect(page.locator('[data-testid="documents-empty-state"]')).toBeVisible();
+    await page.screenshot({ path: "artifacts/documents-empty.png" });
+  });
+});
+
 authTest.describe("Document upload", () => {
   authTest("title field is required — upload dropzone visible", async ({ authenticatedPage: page }) => {
     const docs = new DocumentsPage(page);
@@ -97,6 +116,38 @@ authTest.describe("Document upload", () => {
     await uploadResponsePromise;
     expect(uploadCalled).toBe(true);
     await page.screenshot({ path: "artifacts/upload-success.png" });
+  });
+
+  authTest("uploading a DOCX file calls the upload API", async ({ authenticatedPage: page }) => {
+    let uploadCalled = false;
+    await page.route("**/manage/documents/upload", (route) => {
+      uploadCalled = true;
+      route.fulfill({
+        json: { document_id: "doc-docx", filename: "ibuprofen.docx", status: "pending", message: "Upload successful." },
+      });
+    });
+
+    const docs = new DocumentsPage(page);
+    await docs.goto();
+    await docs.titleInput.fill("Ibuprofen PIL");
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await docs.dropzone.click();
+    const fileChooser = await fileChooserPromise;
+
+    const uploadResponsePromise = page.waitForResponse(
+      (res) => res.url().includes("documents/upload"),
+      { timeout: 10_000 }
+    );
+
+    await fileChooser.setFiles({
+      name: "ibuprofen.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from("DOCX test content"),
+    });
+
+    await uploadResponsePromise;
+    expect(uploadCalled).toBe(true);
   });
 });
 

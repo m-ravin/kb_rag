@@ -17,6 +17,8 @@ from backend.core.clients import get_db
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/manage/auth/token")
 
+_JWT_ALGORITHM = "HS256"
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -30,7 +32,7 @@ def create_access_token(data: dict) -> str:
     s = get_settings()
     payload = data.copy()
     payload["exp"] = datetime.now(timezone.utc) + timedelta(minutes=s.jwt_expire_minutes)
-    return jwt.encode(payload, s.jwt_secret, algorithm=s.jwt_algorithm)
+    return jwt.encode(payload, s.jwt_secret, algorithm=_JWT_ALGORITHM)
 
 
 async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dict:
@@ -42,7 +44,7 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> dic
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])
+        payload = jwt.decode(token, s.jwt_secret, algorithms=[_JWT_ALGORITHM])
         email: str = payload.get("sub", "")
         if not email:
             raise credentials_exc

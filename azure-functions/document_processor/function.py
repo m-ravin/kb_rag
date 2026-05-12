@@ -8,6 +8,11 @@ the Q&A system can later find the right answer.
 
 Think of it like a librarian who reads every new book, writes a summary card
 for each chapter, and files it in the card catalogue.
+
+Implementation note: this function is fully synchronous.
+Mixing async Azure SDK clients with synchronous gremlin_python and PyMuPDF
+causes event-loop deadlocks under concurrent invocations. All I/O here is
+synchronous; the Azure Functions runtime manages the worker process pool.
 """
 
 import json
@@ -18,21 +23,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 import azure.functions as func
-from azure.storage.blob import BlobServiceClient
-from openai import AzureOpenAI
-from azure.search.documents import SearchClient
-from azure.search.documents.models import VectorizedQuery
+import fitz  # PyMuPDF — reads PDFs
+import pymongo
 from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from docx import Document as DocxDocument
 from gremlin_python.driver import client as gremlin_client
 from gremlin_python.driver import serializer
-import motor.motor_asyncio
-import fitz  # PyMuPDF — reads PDFs
-from docx import Document as DocxDocument
+from openai import AzureOpenAI
 from pptx import Presentation
 
 logger = logging.getLogger(__name__)
 
 # ── Azure SDK clients (created once, reused across invocations) ───────────────
+# All clients are synchronous so there is no event-loop contention.
 
 openai_client = AzureOpenAI(
     azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
@@ -46,11 +50,13 @@ search_client = SearchClient(
     credential=AzureKeyCredential(os.environ["AZURE_SEARCH_KEY"]),
 )
 
-mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
-    os.environ["COSMOS_MONGO_CONNECTION"]
-)
+# pymongo (sync) — motor (async) has no place in a sync function
+mongo_client = pymongo.MongoClient(os.environ["COSMOS_MONGO_CONNECTION"])
 db = mongo_client["pil-knowledge-base"]
 
+# How many chunks to embed in a single OpenAI API call (max 2048 texts per call,
+# but 16 is a safe batch size that balances throughput and payload size)
+_EMBED_BATCH_SIZE = 16
 
 # ── Entry point: triggered by a blob upload to pil-documents container ────────
 
@@ -62,7 +68,7 @@ app = func.FunctionApp()
     path="pil-documents/{document_id}/{filename}",
     connection="STORAGE_CONNECTION",
 )
-async def process_document(blob: func.InputStream) -> None:
+def process_document(blob: func.InputStream) -> None:
     """
     Triggered automatically when a file lands in the pil-documents container.
     Runs the full extraction → chunking → embedding → indexing pipeline.
@@ -74,22 +80,44 @@ async def process_document(blob: func.InputStream) -> None:
     document_id = parts[1] if len(parts) > 2 else "unknown"
     filename = parts[-1]
 
+    # Validate magic bytes before doing any parsing (MIME spoofing guard)
+    raw_bytes = blob.read()
+    _validate_magic_bytes(raw_bytes, filename)
+
     # Mark document as processing in MongoDB
-    await _update_document_status(document_id, "processing")
+    _update_document_status(document_id, "processing")
 
     try:
-        raw_bytes = blob.read()
         text, metadata = _extract_content(raw_bytes, filename)
         chunks = _chunk_text(text, chunk_size=512, overlap=64)
-        await _embed_and_index(chunks, document_id, filename, metadata)
-        await _build_chunk_graph(chunks, document_id)
-        await _update_document_status(document_id, "indexed", metadata)
+        _embed_and_index(chunks, document_id, filename, metadata)
+        _build_chunk_graph(chunks, document_id)
+        _update_document_status(document_id, "indexed", metadata)
         logger.info("Successfully processed %s → %d chunks", filename, len(chunks))
 
     except Exception as exc:
         logger.exception("Failed to process %s: %s", blob_name, exc)
-        await _update_document_status(document_id, "failed", error=str(exc))
+        _update_document_status(document_id, "failed", error=str(exc))
         raise
+
+
+# ── Step 0: Validate uploaded file magic bytes ────────────────────────────────
+
+_MAGIC_BYTES: dict[str, bytes] = {
+    "pdf": b"%PDF",
+    "docx": b"PK\x03\x04",  # ZIP-based Office format
+    "pptx": b"PK\x03\x04",
+}
+
+
+def _validate_magic_bytes(raw_bytes: bytes, filename: str) -> None:
+    """Reject files whose magic bytes don't match the declared extension."""
+    ext = filename.rsplit(".", 1)[-1].lower()
+    expected = _MAGIC_BYTES.get(ext)
+    if expected and not raw_bytes.startswith(expected):
+        raise ValueError(
+            f"File content does not match extension .{ext} — upload rejected."
+        )
 
 
 # ── Step 1: Extract text from PDF / DOCX / PPTX ──────────────────────────────
@@ -97,7 +125,6 @@ async def process_document(blob: func.InputStream) -> None:
 def _extract_content(raw_bytes: bytes, filename: str) -> tuple[str, dict]:
     """
     Reads a document file and pulls out all the text.
-
     Like a person reading a book and typing out every word.
     """
     ext = filename.rsplit(".", 1)[-1].lower()
@@ -117,44 +144,44 @@ def _extract_pdf(raw_bytes: bytes, metadata: dict) -> tuple[str, dict]:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(raw_bytes)
         tmp_path = tmp.name
-
-    doc = fitz.open(tmp_path)
-    pages = []
-    for page_num, page in enumerate(doc):
-        pages.append(page.get_text())
-
-    metadata["page_count"] = len(doc)
-    metadata["title"] = doc.metadata.get("title", "")
-    doc.close()
-    return "\n\n".join(pages), metadata
+    try:
+        doc = fitz.open(tmp_path)
+        pages = [page.get_text() for page in doc]
+        metadata["page_count"] = len(doc)
+        metadata["title"] = doc.metadata.get("title", "")
+        doc.close()
+        return "\n\n".join(pages), metadata
+    finally:
+        os.remove(tmp_path)
 
 
 def _extract_docx(raw_bytes: bytes, metadata: dict) -> tuple[str, dict]:
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
         tmp.write(raw_bytes)
         tmp_path = tmp.name
-
-    doc = DocxDocument(tmp_path)
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    metadata["paragraph_count"] = len(paragraphs)
-    return "\n\n".join(paragraphs), metadata
+    try:
+        doc = DocxDocument(tmp_path)
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        metadata["paragraph_count"] = len(paragraphs)
+        return "\n\n".join(paragraphs), metadata
+    finally:
+        os.remove(tmp_path)
 
 
 def _extract_pptx(raw_bytes: bytes, metadata: dict) -> tuple[str, dict]:
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
         tmp.write(raw_bytes)
         tmp_path = tmp.name
-
-    prs = Presentation(tmp_path)
-    slides_text = []
-    for slide in prs.slides:
-        slide_text = " ".join(
-            shape.text for shape in slide.shapes if hasattr(shape, "text")
-        )
-        slides_text.append(slide_text)
-
-    metadata["slide_count"] = len(prs.slides)
-    return "\n\n".join(slides_text), metadata
+    try:
+        prs = Presentation(tmp_path)
+        slides_text = [
+            " ".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
+            for slide in prs.slides
+        ]
+        metadata["slide_count"] = len(prs.slides)
+        return "\n\n".join(slides_text), metadata
+    finally:
+        os.remove(tmp_path)
 
 
 # ── Step 2: Split text into overlapping chunks ─────────────────────────────────
@@ -189,92 +216,102 @@ def _chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[dic
 
 # ── Step 3: Embed and upload to Azure AI Search ───────────────────────────────
 
-async def _embed_and_index(
+def _embed_and_index(
     chunks: list[dict], document_id: str, filename: str, metadata: dict
 ) -> None:
     """
-    Converts each chunk into a vector (list of 1536 numbers) and stores it
-    in Azure AI Search so we can do similarity searches later.
+    Converts each chunk into a vector and stores it in Azure AI Search.
 
-    Like translating each chapter into a secret code that lets us find
-    chapters with similar meanings very quickly.
+    Chunks are embedded in batches of _EMBED_BATCH_SIZE to reduce the number
+    of API round-trips (was previously one call per chunk — now ~16× faster).
     """
+    embedding_model = os.environ.get(
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"
+    )
     documents = []
-    for chunk in chunks:
-        embedding_response = openai_client.embeddings.create(
-            input=chunk["text"],
-            model=os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"),
-        )
-        vector = embedding_response.data[0].embedding
 
-        documents.append(
-            {
-                "id": f"{document_id}_chunk_{chunk['chunk_index']}",
-                "document_id": document_id,
-                "filename": filename,
-                "chunk_index": chunk["chunk_index"],
-                "content": chunk["text"],
-                "content_vector": vector,
-                "metadata": json.dumps(metadata),
-                "indexed_at": datetime.now(timezone.utc).isoformat(),
-            }
+    for batch_start in range(0, len(chunks), _EMBED_BATCH_SIZE):
+        batch = chunks[batch_start : batch_start + _EMBED_BATCH_SIZE]
+        batch_texts = [c["text"] for c in batch]
+
+        response = openai_client.embeddings.create(
+            input=batch_texts,
+            model=embedding_model,
         )
+
+        for j, chunk in enumerate(batch):
+            vector = response.data[j].embedding
+            documents.append(
+                {
+                    "id": f"{document_id}_chunk_{chunk['chunk_index']}",
+                    "document_id": document_id,
+                    "filename": filename,
+                    "chunk_index": chunk["chunk_index"],
+                    "content": chunk["text"],
+                    "content_vector": vector,
+                    "metadata": json.dumps(metadata),
+                    "indexed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
     # Upload in batches of 100 (Azure Search limit per request)
     for i in range(0, len(documents), 100):
-        batch = documents[i : i + 100]
-        search_client.upload_documents(documents=batch)
+        search_client.upload_documents(documents=documents[i : i + 100])
 
     logger.info("Indexed %d chunks for document %s", len(documents), document_id)
 
 
 # ── Step 4: Build chunk relationship graph in Cosmos Gremlin ──────────────────
 
-async def _build_chunk_graph(chunks: list[dict], document_id: str) -> None:
+def _build_chunk_graph(chunks: list[dict], document_id: str) -> None:
     """
-    Creates a map showing how chunks are related to each other
-    (neighbours in the document, same section, etc.)
-
-    Like drawing a web connecting all the chapters of a book to show
-    which ones are near each other or talk about similar things.
+    Creates a map showing how chunks are related to each other.
+    Uses Gremlin parameter bindings to prevent query injection.
+    Graph building is best-effort — failure does not abort the pipeline.
     """
+    gremlin = gremlin_client.Client(
+        os.environ["COSMOS_GREMLIN_ENDPOINT"],
+        "g",
+        username="/dbs/pil-graph/colls/chunk-graph",
+        password=os.environ["COSMOS_GREMLIN_KEY"],
+        message_serializer=serializer.GraphSONSerializersV2d0(),
+    )
     try:
-        gremlin = gremlin_client.Client(
-            os.environ["COSMOS_GREMLIN_ENDPOINT"],
-            "g",
-            username=f"/dbs/pil-graph/colls/chunk-graph",
-            password=os.environ["COSMOS_GREMLIN_KEY"],
-            message_serializer=serializer.GraphSONSerializersV2d0(),
-        )
-
         for chunk in chunks:
             vertex_id = f"{document_id}_chunk_{chunk['chunk_index']}"
+
             gremlin.submit(
-                f"g.addV('chunk')"
-                f".property('id', '{vertex_id}')"
-                f".property('document_id', '{document_id}')"
-                f".property('chunk_index', {chunk['chunk_index']})"
-                f".property('pk', '{document_id}')"
+                "g.addV('chunk')"
+                ".property('id', vid)"
+                ".property('document_id', did)"
+                ".property('chunk_index', cidx)"
+                ".property('pk', did)",
+                {
+                    "vid": vertex_id,
+                    "did": document_id,
+                    "cidx": chunk["chunk_index"],
+                },
             ).all().result()
 
             # Link consecutive chunks with "nextChunk" edge
             if chunk["chunk_index"] > 0:
                 prev_id = f"{document_id}_chunk_{chunk['chunk_index'] - 1}"
                 gremlin.submit(
-                    f"g.V('{prev_id}').addE('nextChunk').to(g.V('{vertex_id}'))"
+                    "g.V(prev_id).addE('nextChunk').to(__.V(curr_id))",
+                    {"prev_id": prev_id, "curr_id": vertex_id},
                 ).all().result()
 
-        gremlin.close()
         logger.info("Built chunk graph for %s (%d nodes)", document_id, len(chunks))
 
     except Exception as exc:
-        # Graph building is best-effort; don't fail the whole pipeline
         logger.warning("Graph build failed for %s: %s", document_id, exc)
+    finally:
+        gremlin.close()
 
 
 # ── Helpers: MongoDB status updates ──────────────────────────────────────────
 
-async def _update_document_status(
+def _update_document_status(
     document_id: str,
     status: str,
     metadata: dict | None = None,
@@ -289,7 +326,7 @@ async def _update_document_status(
     if error:
         update["error"] = error
 
-    await db["documents"].update_one(
+    db["documents"].update_one(
         {"document_id": document_id},
         {"$set": update},
         upsert=True,
