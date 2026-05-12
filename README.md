@@ -27,7 +27,8 @@ User Question
      │
      ▼
 [Q&A Flow API]  (FastAPI on AKS)
-  ├─ PII Detection + Masking  →  [Presidio (local NLP, no data egress)]
+  ├─ PII Detection + Masking  →  [Presidio service — self-hosted sidecar pod in AKS]
+  │                                 (Docker Compose: presidio-service:8080 · AKS: ClusterIP, not public)
   ├─ Content Safety check     →  [Azure AI Content Safety]
   ├─ Question Type            →  [GPT-4o]
   ├─ Keyword Extraction       →  [GPT-4o]
@@ -76,6 +77,14 @@ Document Upload (CMS)
 | 13 | **Azure Container Registry** | Private Docker image storage | A private warehouse for packaged app versions |
 | 14 | **Azure Monitor + App Insights** | Logs, traces, metrics, dashboards | Security cameras watching everything |
 | 15 | **Azure AI Content Safety** | Input/output content screening | A school internet filter |
+
+> **Note — Presidio PII service (self-hosted, not an Azure service):**
+> Presidio runs as a **separate container inside AKS** (ClusterIP — not publicly accessible).
+> It is built from `presidio-service/` and deployed alongside the FastAPI backend in the same
+> Kubernetes namespace. In local development it starts automatically via `docker-compose up`.
+> Because it runs on the same cluster, PII text never leaves the machine for an external API.
+> See [`docs/adr/0010-presidio-pii-microservice.md`](docs/adr/0010-presidio-pii-microservice.md)
+> for the decision rationale.
 
 ---
 
