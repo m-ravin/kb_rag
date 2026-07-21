@@ -72,10 +72,13 @@ jobs:
         if: github.event.inputs.action == 'apply'
         run: |
           echo "acr_login_server=$(terraform output -raw acr_login_server 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
-          echo "aks_cluster_name=$(terraform output -raw aks_cluster_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
           echo "resource_group_name=$(terraform output -raw resource_group_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
           echo "key_vault_uri=$(terraform output -raw key_vault_uri 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
           echo "app_insights_cs=$(terraform output -raw app_insights_connection_string 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "aca_identity_id=$(terraform output -raw aca_identity_id 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "backend_app_name=$(terraform output -raw backend_app_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "frontend_app_name=$(terraform output -raw frontend_app_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "presidio_app_name=$(terraform output -raw presidio_app_name 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
 
       - name: Push infrastructure outputs back to GitHub Secrets
         if: github.event.inputs.action == 'apply' && steps.tf_outputs.outputs.acr_login_server != ''
@@ -85,40 +88,15 @@ jobs:
           REPO="${{ github.repository }}"
 
           # Resource identifiers (not sensitive — needed by deploy workflow)
-          gh secret set ACR_LOGIN_SERVER     --body "${{ steps.tf_outputs.outputs.acr_login_server }}"     --repo "$REPO"
-          gh secret set AKS_CLUSTER_NAME    --body "${{ steps.tf_outputs.outputs.aks_cluster_name }}"    --repo "$REPO"
-          gh secret set AKS_RESOURCE_GROUP  --body "${{ steps.tf_outputs.outputs.resource_group_name }}" --repo "$REPO"
-          gh secret set KEY_VAULT_URI        --body "${{ steps.tf_outputs.outputs.key_vault_uri }}"        --repo "$REPO"
+          gh secret set ACR_LOGIN_SERVER        --body "${{ steps.tf_outputs.outputs.acr_login_server }}"      --repo "$REPO"
+          gh secret set ACA_RESOURCE_GROUP      --body "${{ steps.tf_outputs.outputs.resource_group_name }}"   --repo "$REPO"
+          gh secret set KEY_VAULT_URI           --body "${{ steps.tf_outputs.outputs.key_vault_uri }}"         --repo "$REPO"
+          gh secret set ACA_IDENTITY_ID         --body "${{ steps.tf_outputs.outputs.aca_identity_id }}"       --repo "$REPO"
+          gh secret set ACA_BACKEND_APP_NAME    --body "${{ steps.tf_outputs.outputs.backend_app_name }}"      --repo "$REPO"
+          gh secret set ACA_FRONTEND_APP_NAME   --body "${{ steps.tf_outputs.outputs.frontend_app_name }}"     --repo "$REPO"
+          gh secret set ACA_PRESIDIO_APP_NAME   --body "${{ steps.tf_outputs.outputs.presidio_app_name }}"     --repo "$REPO"
 
           echo "GitHub Secrets updated from Terraform outputs"
-
-      # ── Generate SecretProviderClass with Key Vault name baked in ─────────────
-      # Pods use this to mount secrets directly from Key Vault without storing
-      # them in Kubernetes etcd.
-
-      - name: Generate SecretProviderClass manifest
-        if: github.event.inputs.action == 'apply'
-        working-directory: ${{ github.workspace }}
-        run: |
-          KV_NAME=$(echo "${{ steps.tf_outputs.outputs.key_vault_uri }}" | sed 's|https://||;s|.vault.azure.net/||')
-          TENANT_ID="${{ secrets.ARM_TENANT_ID }}"
-
-          sed \
-            -e "s|KEY_VAULT_NAME_PLACEHOLDER|${KV_NAME}|g" \
-            -e "s|TENANT_ID_PLACEHOLDER|${TENANT_ID}|g" \
-            infrastructure/kubernetes/secret-provider-class.yaml.tpl \
-            > infrastructure/kubernetes/secret-provider-class.yaml
-
-          echo "Generated secret-provider-class.yaml for Key Vault: ${KV_NAME}"
-          cat infrastructure/kubernetes/secret-provider-class.yaml
-
-      - name: Upload SecretProviderClass as artifact
-        if: github.event.inputs.action == 'apply'
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-manifests
-          path: infrastructure/kubernetes/secret-provider-class.yaml
-          retention-days: 7
 
       # ── Destroy (only when action == destroy) ─────────────────────────────────
 

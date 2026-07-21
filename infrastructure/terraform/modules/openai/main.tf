@@ -48,17 +48,24 @@ resource "azurerm_cognitive_deployment" "embedding" {
   }
 }
 
-# Azure AI Content Safety — screens inputs and outputs
+# Azure AI Content Safety — screens inputs and outputs.
+# F0 free tier: 5,000 text records/month, plenty for personal-scale usage.
 resource "azurerm_cognitive_account" "content_safety" {
   name                = "cs-${var.name_suffix}"
   location            = var.location
   resource_group_name = var.resource_group_name
   kind                = "ContentSafety"
-  sku_name            = "S0"
+  sku_name            = "F0"
   tags                = var.tags
 }
 
-output "endpoint"              { value = azurerm_cognitive_account.openai.endpoint }
-output "primary_key"           { value = azurerm_cognitive_account.openai.primary_access_key; sensitive = true }
+output "endpoint" { value = azurerm_cognitive_account.openai.endpoint }
+output "primary_key" {
+  value     = azurerm_cognitive_account.openai.primary_access_key
+  sensitive = true
+}
 output "content_safety_endpoint" { value = azurerm_cognitive_account.content_safety.endpoint }
-output "content_safety_key"    { value = azurerm_cognitive_account.content_safety.primary_access_key; sensitive = true }
+output "content_safety_key" {
+  value     = azurerm_cognitive_account.content_safety.primary_access_key
+  sensitive = true
+}

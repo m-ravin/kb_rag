@@ -5,14 +5,16 @@ variable "capacity" { type = number }
 variable "tags" { type = map(string) }
 
 # Azure Cache for Redis — holds intermediate search results so we don't
-# re-query the vector DB for the same question twice within 5 minutes
+# re-query the vector DB for the same question twice within 5 minutes.
+# No free tier exists for Redis; Basic C0 is the cheapest paid option (no SLA/replication,
+# fine for a personal single-instance deployment).
 resource "azurerm_redis_cache" "main" {
   name                = "redis-${var.name_suffix}"
   location            = var.location
   resource_group_name = var.resource_group_name
   capacity            = var.capacity
   family              = "C"
-  sku_name            = "Standard"
+  sku_name            = "Basic"
   enable_non_ssl_port = false
   minimum_tls_version = "1.2"
 
@@ -23,6 +25,9 @@ resource "azurerm_redis_cache" "main" {
   tags = var.tags
 }
 
-output "hostname"                  { value = azurerm_redis_cache.main.hostname }
-output "primary_connection_string" { value = azurerm_redis_cache.main.primary_connection_string; sensitive = true }
-output "ssl_port"                  { value = azurerm_redis_cache.main.ssl_port }
+output "hostname" { value = azurerm_redis_cache.main.hostname }
+output "primary_connection_string" {
+  value     = azurerm_redis_cache.main.primary_connection_string
+  sensitive = true
+}
+output "ssl_port" { value = azurerm_redis_cache.main.ssl_port }
