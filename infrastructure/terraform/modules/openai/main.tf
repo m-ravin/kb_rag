@@ -14,7 +14,14 @@ resource "azurerm_cognitive_account" "openai" {
   tags                = var.tags
 }
 
-# GPT-4o deployment — handles Q&A, summarisation, wording tuning
+# GPT deployment — handles Q&A, summarisation, wording tuning.
+# As of 2026-07, the entire gpt-4o/gpt-4.1 generation is deprecating and
+# blocked for new deployments on this account/catalog — confirmed by querying
+# `az cognitiveservices account list-models` live rather than assuming.
+# gpt-5-mini is the current GA + GlobalStandard mini-tier model (cheap,
+# strong enough for RAG Q&A). If this model also rotates out of GA later,
+# re-run that command to find the current GA+GlobalStandard chat model list
+# before picking a replacement — do not assume any hardcoded version stays valid.
 resource "azurerm_cognitive_deployment" "gpt" {
   name                 = var.gpt_model
   cognitive_account_id = azurerm_cognitive_account.openai.id
@@ -22,11 +29,14 @@ resource "azurerm_cognitive_deployment" "gpt" {
   model {
     format  = "OpenAI"
     name    = var.gpt_model
-    version = "2024-08-06"
+    version = "2025-08-07"
   }
 
   scale {
-    type     = "Standard"
+    # GlobalStandard (not Standard) — southeastasia doesn't support region-pinned
+    # "Standard" scale for gpt-4o; GlobalStandard routes across Azure's global
+    # capacity pool for this model instead.
+    type     = "GlobalStandard"
     capacity = 30  # 30k tokens per minute
   }
 }
@@ -43,7 +53,8 @@ resource "azurerm_cognitive_deployment" "embedding" {
   }
 
   scale {
-    type     = "Standard"
+    # GlobalStandard — same regional-availability reason as the gpt deployment above.
+    type     = "GlobalStandard"
     capacity = 120  # 120k tokens per minute for embeddings
   }
 }

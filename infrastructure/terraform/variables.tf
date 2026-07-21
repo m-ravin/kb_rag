@@ -11,9 +11,9 @@ variable "location" {
 }
 
 variable "openai_location" {
-  description = "Azure region for Azure OpenAI + Content Safety. Must support gpt-4o and text-embedding-3-small — centralindia does not, so this is split from `location`."
+  description = "Azure region for Azure OpenAI + Content Safety. Must support gpt-4o (GlobalStandard) and text-embedding-3-small — centralindia does not support either, and southeastasia supports the embedding model but not gpt-4o (confirmed via Azure's region-availability docs: GlobalStandard gpt-4o in Asia Pacific is only in australiaeast/japaneast/koreacentral/southindia). southindia is used here since it's the closest to centralindia and supports both models."
   type        = string
-  default     = "southeastasia"
+  default     = "southindia"
 }
 
 variable "environment" {
@@ -23,9 +23,9 @@ variable "environment" {
 }
 
 variable "openai_gpt_model" {
-  description = "Azure OpenAI GPT model deployment name"
+  description = "Azure OpenAI GPT model deployment name. The gpt-4o/gpt-4.1 generation is deprecating and blocked for new deployments as of 2026-07 — gpt-5-mini used instead (GA, GlobalStandard, cheapest current mini-tier model). Verify with `az cognitiveservices account list-models` before changing, since Azure rotates model availability quickly."
   type        = string
-  default     = "gpt-4o"
+  default     = "gpt-5-mini"
 }
 
 variable "openai_embedding_model" {

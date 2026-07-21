@@ -36,6 +36,7 @@ frontend/test-results/
 infrastructure/terraform/.terraform/
 infrastructure/terraform/.terraform.lock.hcl
 infrastructure/terraform/tfplan
+infrastructure/terraform/tfplan-*
 infrastructure/terraform/*.tfstate
 infrastructure/terraform/*.tfstate.backup
 infrastructure/terraform/.terraform.tfstate.lock.info
