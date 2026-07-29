@@ -27,6 +27,7 @@ synchronous; the Azure Functions runtime manages the worker process pool.
 import logging
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 # Ensures `ingest` resolves regardless of how the Functions runtime sets
@@ -51,26 +52,42 @@ from ingest.vector_store import build_search_documents, upload_to_search
 
 logger = logging.getLogger(__name__)
 
-# ── Azure SDK clients (created once, reused across invocations) ───────────────
+# ── Azure SDK clients (created lazily, cached, reused across invocations) ─────
 # All clients are synchronous so there is no event-loop contention.
-
-openai_client = AzureOpenAI(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-    api_key=os.environ["AZURE_OPENAI_KEY"],
-    api_version="2024-08-01-preview",
-)
-
-search_client = SearchClient(
-    endpoint=os.environ["AZURE_SEARCH_ENDPOINT"],
-    index_name=os.environ.get("AZURE_SEARCH_INDEX_NAME", "pil-documents"),
-    credential=AzureKeyCredential(os.environ["AZURE_SEARCH_KEY"]),
-)
-
-# pymongo (sync) — motor (async) has no place in a sync function
-mongo_client = pymongo.MongoClient(os.environ["COSMOS_MONGO_CONNECTION"])
-db = mongo_client["pil-knowledge-base"]
+#
+# These used to be constructed eagerly at module level. On Linux Consumption,
+# module-level code runs during function *indexing* (cold start / worker
+# specialization), not just at first invocation — so any slow or
+# network-touching client construction here delays indexing itself. Wrapping
+# each client in an lru_cache(maxsize=1) defers construction to the first
+# real blob-trigger invocation while still only building it once per worker.
 
 _EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+
+
+@lru_cache(maxsize=1)
+def _get_openai_client() -> AzureOpenAI:
+    return AzureOpenAI(
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_key=os.environ["AZURE_OPENAI_KEY"],
+        api_version="2024-08-01-preview",
+    )
+
+
+@lru_cache(maxsize=1)
+def _get_search_client() -> SearchClient:
+    return SearchClient(
+        endpoint=os.environ["AZURE_SEARCH_ENDPOINT"],
+        index_name=os.environ.get("AZURE_SEARCH_INDEX_NAME", "pil-documents"),
+        credential=AzureKeyCredential(os.environ["AZURE_SEARCH_KEY"]),
+    )
+
+
+@lru_cache(maxsize=1)
+def _get_mongo_db():
+    # pymongo (sync) — motor (async) has no place in a sync function
+    mongo_client = pymongo.MongoClient(os.environ["COSMOS_MONGO_CONNECTION"])
+    return mongo_client[os.environ.get("COSMOS_DB_NAME", "pil-knowledge-base")]
 
 
 def _new_gremlin_client() -> gremlin_client.Client:
@@ -110,15 +127,16 @@ def process_document(blob: func.InputStream) -> None:
     raw_bytes = blob.read()
     validate_magic_bytes(raw_bytes, filename)
 
+    db = _get_mongo_db()
     update_document_status(db, document_id, "processing")
 
     try:
         text, metadata = extract_content(raw_bytes, filename)
         chunks = chunk_text(text, chunk_size=512, overlap=64)
 
-        vectors = embed_texts(openai_client, [c["text"] for c in chunks], _EMBEDDING_MODEL)
+        vectors = embed_texts(_get_openai_client(), [c["text"] for c in chunks], _EMBEDDING_MODEL)
         documents = build_search_documents(chunks, vectors, document_id, filename, metadata)
-        upload_to_search(search_client, documents)
+        upload_to_search(_get_search_client(), documents)
         logger.info("Indexed %d chunks for document %s", len(documents), document_id)
 
         build_chunk_graph(_new_gremlin_client, chunks, document_id)
