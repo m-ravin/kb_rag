@@ -125,7 +125,14 @@ kb_rag/
 │
 ├── azure-functions/
 │   └── document_processor/
-│       └── function.py              # Blob-triggered: extract → chunk → embed → index
+│       ├── function.py              # Blob trigger — wires the stages below together
+│       └── ingest/
+│           ├── extraction.py        # PDF/DOCX/PPTX text extraction + magic-byte check
+│           ├── chunking.py          # Splits text into overlapping chunks
+│           ├── embedding.py         # Chunk text → vectors (Azure OpenAI)
+│           ├── vector_store.py      # Builds + uploads Azure AI Search documents
+│           ├── graph.py             # Cosmos Gremlin chunk relationship graph
+│           └── status.py            # MongoDB document status updates
 │
 ├── infrastructure/
 │   ├── terraform/                   # Provisions all 15 Azure resources

@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     cosmos_gremlin_graph: str = "chunk-graph"
 
     # ── Azure Cache for Redis ─────────────────────────────────────────────────
-    redis_connection: str
+    # Optional: only used for Q&A result caching (search_service.py). Not needed
+    # for the document ingestion pipeline. Leave unset until the Q&A/testing phase.
+    redis_connection: str | None = None
 
     # ── Azure Data Lake Storage ───────────────────────────────────────────────
     storage_connection: str

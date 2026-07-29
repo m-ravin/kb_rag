@@ -109,7 +109,7 @@ npm run test:e2e       # Run Playwright against it
 
 ```bash
 python tests/test_pure_logic.py       # 28 tests
-python tests/unit/pipeline/test_chunker.py  # 14 tests
+python tests/unit/ingest/test_chunking.py   # 8 tests — imports the real chunking stage
 ```
 
 ## Code Style

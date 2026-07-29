@@ -98,14 +98,20 @@ def create_app() -> FastAPI:
 
     @app.get("/ready", tags=["Health"])
     async def readiness() -> dict:
-        """Kubernetes readiness probe — verifies critical dependencies."""
+        """
+        Readiness probe — verifies critical dependencies.
+        Redis is optional (Q&A caching only, not needed for ingestion) — only
+        checked if REDIS_CONNECTION is actually configured.
+        """
         from fastapi import HTTPException
         from backend.core.clients import get_redis_client
-        try:
-            redis = get_redis_client()
-            await redis.ping()
-        except Exception:
-            raise HTTPException(status_code=503, detail="Redis unavailable")
+
+        if s.redis_connection:
+            try:
+                redis = get_redis_client()
+                await redis.ping()
+            except Exception:
+                raise HTTPException(status_code=503, detail="Redis unavailable")
         return {"status": "ready"}
 
     return app

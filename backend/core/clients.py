@@ -51,8 +51,11 @@ def get_db():
 @lru_cache
 def get_redis_client() -> aioredis.Redis:
     """The Post-it note board — caches answers so we don't repeat work."""
+    connection = get_settings().redis_connection
+    if not connection:
+        raise RuntimeError("REDIS_CONNECTION is not configured — caching is disabled")
     return aioredis.from_url(
-        get_settings().redis_connection,
+        connection,
         encoding="utf-8",
         decode_responses=True,
     )
