@@ -19,9 +19,9 @@ resource "azurerm_resource_group" "main" {
 
 # ── Azure AI Search (reused, existing free-tier service) ─────────────────────
 module "search" {
-  source                        = "./modules/search"
-  existing_name                 = var.existing_search_name
-  existing_resource_group_name  = var.existing_resource_group_name
+  source                       = "./modules/search"
+  existing_name                = var.existing_search_name
+  existing_resource_group_name = var.existing_resource_group_name
 }
 
 # ── Cosmos DB (MongoDB + Gremlin) — new, existing account is SQL API only ────
@@ -49,9 +49,9 @@ module "openai" {
 
 # ── Azure Data Lake Storage Gen2 (reused, existing HNS-enabled account) ──────
 module "storage" {
-  source                        = "./modules/storage"
-  existing_name                 = var.existing_storage_account_name
-  existing_resource_group_name  = var.existing_resource_group_name
+  source                       = "./modules/storage"
+  existing_name                = var.existing_storage_account_name
+  existing_resource_group_name = var.existing_resource_group_name
 }
 
 # ── Azure Cache for Redis (intermediate result cache) ─────────────────────────
@@ -72,6 +72,7 @@ module "functions" {
   name_suffix          = "${local.name_suffix}${random_string.suffix.result}"
   storage_account_name = module.storage.storage_account_name
   storage_account_key  = module.storage.storage_account_key
+  key_vault_uri        = data.azurerm_key_vault.main.vault_uri
   tags                 = var.tags
 }
 
@@ -88,12 +89,12 @@ module "monitoring" {
 # Replaces AKS + API Management: Consumption plan scales to zero, and rate
 # limiting is handled in-app via backend/core/limiter.py instead of an APIM policy.
 module "container_apps" {
-  source                      = "./modules/container_apps"
-  resource_group_name         = azurerm_resource_group.main.name
-  location                    = var.location
-  name_suffix                 = "${local.name_suffix}${random_string.suffix.result}"
-  log_analytics_workspace_id  = module.monitoring.log_analytics_workspace_id
-  tags                        = var.tags
+  source                     = "./modules/container_apps"
+  resource_group_name        = azurerm_resource_group.main.name
+  location                   = var.location
+  name_suffix                = "${local.name_suffix}${random_string.suffix.result}"
+  log_analytics_workspace_id = module.monitoring.log_analytics_workspace_id
+  tags                       = var.tags
 }
 
 data "azurerm_client_config" "current" {}
@@ -115,6 +116,27 @@ resource "azurerm_role_assignment" "container_apps_kv_secrets_user" {
   scope                = data.azurerm_key_vault.main.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = module.container_apps.identity_principal_id
+}
+
+# The ingestion Function App's own system-assigned identity reads secrets at runtime
+#
+# DRIFT FOOTGUN (observed 2026-07-29): azurerm_role_assignment binds to a
+# principal_id captured at apply time. Any operation that regenerates the
+# Function App's SystemAssigned identity (e.g. recreating the app, or certain
+# identity-toggle sequences) changes the live principalId, but this resource
+# can't update principal_id in place — Terraform's cached state can keep
+# pointing at a stale, now-unauthorized identity, and `terraform plan` won't
+# even show the drift until a `terraform refresh` picks up the live identity
+# first. Symptom looks exactly like a Key Vault network/firewall problem
+# (AccessToKeyVaultDenied) even though RBAC "looks" correctly assigned. If Key
+# Vault references start failing again, compare
+# `az functionapp identity show --name <app> --resource-group <rg> --query principalId`
+# against this role assignment's actual principal_id in state before assuming
+# it's a network/config issue.
+resource "azurerm_role_assignment" "functions_kv_secrets_user" {
+  scope                = data.azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = module.functions.function_app_principal_id
 }
 
 # ── Store all secrets in Key Vault ────────────────────────────────────────────
