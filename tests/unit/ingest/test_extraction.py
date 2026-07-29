@@ -2,7 +2,7 @@
 
 import pytest
 
-from ingest.extraction import validate_magic_bytes
+from stage1_extraction import validate_magic_bytes
 
 
 class TestValidateMagicBytes:

@@ -1,7 +1,12 @@
 azure-functions==1.21.0
 azure-storage-blob==12.19.1
 azure-search-documents==11.6.0b4
-openai==1.40.0
+# >=1.55.3 stopped unconditionally passing proxies=None down to its httpx
+# client wrapper (openai==1.40.0 did this, which breaks construction under
+# any httpx version whose Client rejects/deprecates that kwarg differently
+# than openai expects — observed as
+# "Client.__init__() got an unexpected keyword argument 'proxies'").
+openai>=1.55.3,<2.0.0
 # pymongo (sync) replaces motor (async) — the function is fully synchronous
 pymongo==4.7.2
 pymupdf==1.24.5

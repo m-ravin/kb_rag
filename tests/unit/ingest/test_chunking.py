@@ -2,11 +2,11 @@
 Unit tests for the chunking stage.
 
 Imports the real chunk_text implementation from
-azure-functions/document_processor/ingest/chunking.py — previously this test
+azure-functions/document_processor/stage2_chunking.py — previously this test
 duplicated the logic inline instead, so a regression in the real function
 would never have been caught.
 
-chunking.py has zero third-party dependencies, so — like the file this
+stage2_chunking.py has zero third-party dependencies, so — like the file this
 replaces — this test is runnable stdlib-only, no `uv sync` required:
     python tests/unit/ingest/test_chunking.py
 """
@@ -24,7 +24,7 @@ _DOCUMENT_PROCESSOR_DIR = (
 if str(_DOCUMENT_PROCESSOR_DIR) not in sys.path:
     sys.path.insert(0, str(_DOCUMENT_PROCESSOR_DIR))
 
-from ingest.chunking import chunk_text  # noqa: E402
+from stage2_chunking import chunk_text  # noqa: E402
 
 
 class TestChunkText(unittest.TestCase):

@@ -23,8 +23,12 @@ def build_chunk_graph(
     per call, matching the original per-invocation connection behaviour.
     Uses Gremlin parameter bindings throughout to prevent query injection.
     """
-    gremlin = gremlin_client_factory()
+    # Client construction itself can fail (e.g. missing transport deps) —
+    # keep it inside the try so that's covered by the best-effort contract
+    # too, not just errors during the Gremlin submits below.
+    gremlin = None
     try:
+        gremlin = gremlin_client_factory()
         for chunk in chunks:
             vertex_id = f"{document_id}_chunk_{chunk['chunk_index']}"
 
@@ -54,4 +58,5 @@ def build_chunk_graph(
     except Exception as exc:
         logger.warning("Graph build failed for %s: %s", document_id, exc)
     finally:
-        gremlin.close()
+        if gremlin is not None:
+            gremlin.close()

@@ -1,6 +1,7 @@
 """
 Adds azure-functions/document_processor to sys.path so tests in this
-directory can import the real ingest/ pipeline modules.
+directory can import the real pipeline stage modules (chunking, extraction,
+embedding, etc.) that live flat in that folder alongside function_app.py.
 
 That folder isn't part of the installable `backend` package (see
 pyproject.toml's [tool.hatch.build.targets.wheel]) and its parent directory

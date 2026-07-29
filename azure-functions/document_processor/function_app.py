@@ -9,14 +9,29 @@ the Q&A system can later find the right answer.
 Think of it like a librarian who reads every new book, writes a summary card
 for each chapter, and files it in the card catalogue.
 
-This file only wires the blob trigger to the pipeline stages in ingest/ — to
-fix a specific step, edit its module there instead of here:
-  ingest/extraction.py    — text extraction from PDF/DOCX/PPTX + magic byte check
-  ingest/chunking.py      — splitting text into overlapping chunks
-  ingest/embedding.py     — turning chunk text into vectors via Azure OpenAI
-  ingest/vector_store.py  — building + uploading Azure AI Search documents
-  ingest/graph.py         — Cosmos Gremlin chunk relationship graph
-  ingest/status.py        — MongoDB document status updates
+This file only wires the blob trigger to the pipeline stage modules below — to
+fix a specific step, edit its module there instead of here. Numbered by
+execution order (stage1 runs first, stage6 last):
+  stage1_extraction.py    — text extraction from PDF/DOCX/PPTX + magic byte check
+  stage2_chunking.py      — splitting text into overlapping chunks
+  stage3_embedding.py     — turning chunk text into vectors via Azure OpenAI
+  stage4_vector_store.py  — building + uploading Azure AI Search documents
+  stage5_graph.py         — Cosmos Gremlin chunk relationship graph
+  stage6_status.py        — MongoDB document status updates (also called
+                             before stage1 to mark "processing" — it brackets
+                             the whole pipeline rather than being a one-shot
+                             step, but is numbered last as the pipeline's
+                             final write on success)
+
+Deliberately flat (not an ingest/ subpackage): the Azure Functions Consumption
+plan's remote build pipeline was observed to intermittently corrupt nested
+subdirectories in the deployed package (files ending up flattened with a
+literal backslash in the name instead of living in a real subdirectory),
+causing sporadic "No module named 'ingest'" failures on an otherwise-identical
+zip. Flat modules alongside function_app.py sidestep that entirely. Modules
+are numeric-prefixed (not a plain "ingest" grouping) purely to keep the
+execution order visible in a flat directory listing — `import stage1_x`
+works fine since the digit isn't leading an otherwise-bare identifier.
 
 Implementation note: this function is fully synchronous.
 Mixing async Azure SDK clients with synchronous gremlin_python and PyMuPDF
@@ -30,8 +45,8 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-# Ensures `ingest` resolves regardless of how the Functions runtime sets
-# sys.path for this file — this directory isn't part of the installable
+# Ensures sibling modules resolve regardless of how the Functions runtime
+# sets sys.path for this file — this directory isn't part of the installable
 # `backend` package (see pyproject.toml), so it can't rely on that.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -43,12 +58,12 @@ from gremlin_python.driver import client as gremlin_client
 from gremlin_python.driver import serializer
 from openai import AzureOpenAI
 
-from ingest.chunking import chunk_text
-from ingest.embedding import embed_texts
-from ingest.extraction import extract_content, validate_magic_bytes
-from ingest.graph import build_chunk_graph
-from ingest.status import update_document_status
-from ingest.vector_store import build_search_documents, upload_to_search
+from stage1_extraction import extract_content, validate_magic_bytes
+from stage2_chunking import chunk_text
+from stage3_embedding import embed_texts
+from stage4_vector_store import build_search_documents, upload_to_search
+from stage5_graph import build_chunk_graph
+from stage6_status import update_document_status
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +121,15 @@ def _new_gremlin_client() -> gremlin_client.Client:
 app = func.FunctionApp()
 
 
+# source="EventGrid" fires within seconds of a blob write, backed by an Event
+# Grid subscription on the storage account. Without it, the SDK falls back to
+# LogsAndContainerScan — a polling scan of storage logs that can take minutes
+# (occasionally much longer) to notice a new blob.
 @app.blob_trigger(
     arg_name="blob",
     path="pil-documents/{document_id}/{filename}",
     connection="STORAGE_CONNECTION",
+    source="EventGrid",
 )
 def process_document(blob: func.InputStream) -> None:
     """
