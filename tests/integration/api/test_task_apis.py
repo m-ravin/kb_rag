@@ -5,10 +5,28 @@ User journeys covered:
   - As a developer, I want each Task API to return a result with latency metadata
   - As a developer, I want the message-template-parser to fill variables without LLM calls
   - As a developer, I want the translation endpoint to forward the target language
+
+Auth note: every /tasks/* route is protected via a router-level
+Depends(get_current_user), bound to the real function at router import time.
+unittest.mock.patch() on the router's imported name does NOT intercept that
+binding — client.app.dependency_overrides[get_current_user] is the actual
+FastAPI override mechanism, applied here via an autouse fixture since every
+test in this file needs it.
 """
 
 import pytest
 from unittest.mock import AsyncMock, patch
+
+from backend.core.auth import get_current_user
+
+
+@pytest.fixture(autouse=True)
+def _authenticated(client):
+    """Every /tasks/* endpoint requires auth — authenticate as a generic user for this whole file."""
+    client.app.dependency_overrides[get_current_user] = lambda: {
+        "email": "test@test.com",
+        "role": "editor",
+    }
 
 
 class TestTaskAPIs:

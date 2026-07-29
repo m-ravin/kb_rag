@@ -10,7 +10,7 @@ User journeys covered:
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from tests.conftest import make_chunk_result
+from tests.conftest import make_chunk_result_obj
 
 
 class TestQAFlowAsk:
@@ -23,7 +23,9 @@ class TestQAFlowAsk:
              patch("backend.api.qa_flow.router.search_service") as mock_search, \
              patch("backend.api.qa_flow.router.monitoring_service") as mock_monitor:
 
-            mock_safety.detect_pii = AsyncMock(return_value=(False, []))
+            mock_safety.screen_pii = AsyncMock(
+                return_value=(False, [], "What is the dose of paracetamol?")
+            )
             mock_safety.check_content_safety = AsyncMock(return_value=(True, ""))
             mock_llm.detect_question_type = AsyncMock(return_value=__import__(
                 "backend.models.qa", fromlist=["QuestionType"]
@@ -33,7 +35,7 @@ class TestQAFlowAsk:
             mock_llm.tune_wording = AsyncMock(return_value=("Take 500mg every 4 hours.", 20))
             mock_llm.check_compliance = AsyncMock(return_value=(True, ""))
             mock_llm.detect_language = AsyncMock(return_value="en")
-            mock_search.hybrid_search = AsyncMock(return_value=[make_chunk_result()])
+            mock_search.hybrid_search = AsyncMock(return_value=[make_chunk_result_obj()])
             mock_search.graph_search = AsyncMock(return_value=[])
             mock_monitor.log_qa_interaction = AsyncMock()
 
@@ -56,7 +58,7 @@ class TestQAFlowAsk:
              patch("backend.api.qa_flow.router.llm_service") as mock_llm, \
              patch("backend.api.qa_flow.router.monitoring_service") as mock_monitor:
 
-            mock_safety.detect_pii = AsyncMock(return_value=(False, []))
+            mock_safety.screen_pii = AsyncMock(return_value=(False, [], "harmful content here"))
             mock_safety.check_content_safety = AsyncMock(return_value=(False, "Hate"))
             mock_monitor.log_qa_interaction = AsyncMock()
 
@@ -81,7 +83,9 @@ class TestQAFlowAsk:
              patch("backend.api.qa_flow.router.search_service") as mock_search, \
              patch("backend.api.qa_flow.router.monitoring_service") as mock_monitor:
 
-            mock_safety.detect_pii = AsyncMock(return_value=(True, ["email"]))
+            mock_safety.screen_pii = AsyncMock(
+                return_value=(True, ["email"], "[REDACTED] - what is the dose?")
+            )
             mock_safety.check_content_safety = AsyncMock(return_value=(True, ""))
             mock_llm.detect_question_type = AsyncMock(return_value=QuestionType.FACTUAL)
             mock_llm.extract_keywords = AsyncMock(return_value=["dose"])
@@ -89,7 +93,7 @@ class TestQAFlowAsk:
             mock_llm.tune_wording = AsyncMock(return_value=("The dose is 500mg.", 10))
             mock_llm.check_compliance = AsyncMock(return_value=(True, ""))
             mock_llm.detect_language = AsyncMock(return_value="en")
-            mock_search.hybrid_search = AsyncMock(return_value=[make_chunk_result()])
+            mock_search.hybrid_search = AsyncMock(return_value=[make_chunk_result_obj()])
             mock_search.graph_search = AsyncMock(return_value=[])
             mock_monitor.log_qa_interaction = AsyncMock()
 
@@ -127,7 +131,7 @@ class TestQAFlowAsk:
              patch("backend.api.qa_flow.router.search_service") as mock_search, \
              patch("backend.api.qa_flow.router.monitoring_service") as mock_monitor:
 
-            mock_safety.detect_pii = AsyncMock(return_value=(False, []))
+            mock_safety.screen_pii = AsyncMock(return_value=(False, [], "What is the dose?"))
             mock_safety.check_content_safety = AsyncMock(return_value=(True, ""))
             mock_llm.detect_question_type = AsyncMock(return_value=QuestionType.FAQ)
             mock_llm.extract_keywords = AsyncMock(return_value=["dose"])
@@ -156,7 +160,7 @@ class TestQAFlowAsk:
              patch("backend.api.qa_flow.router.search_service") as mock_search, \
              patch("backend.api.qa_flow.router.monitoring_service") as mock_monitor:
 
-            mock_safety.detect_pii = AsyncMock(return_value=(False, []))
+            mock_safety.screen_pii = AsyncMock(return_value=(False, [], "What is the dose?"))
             mock_safety.check_content_safety = AsyncMock(return_value=(True, ""))
             mock_llm.detect_question_type = AsyncMock(return_value=QuestionType.FAQ)
             mock_llm.extract_keywords = AsyncMock(return_value=[])

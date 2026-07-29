@@ -30,19 +30,23 @@ router = APIRouter(prefix="/qa", tags=["Q&A Flow"])
 
 @router.post("/ask", response_model=AskResponse)
 @limiter.limit("30/minute")
-async def ask(http_request: Request, request: AskRequest) -> AskResponse:
+async def ask(request: Request, payload: AskRequest) -> AskResponse:
     """
     Full RAG pipeline: question → safety → search → LLM → answer.
     This is the endpoint the chat UI calls.
+
+    The Starlette Request must be named `request` (not `http_request`) — slowapi's
+    @limiter.limit decorator looks for a parameter literally named `request` to find
+    it, and grabs the wrong one (silently) if the body model claims that name instead.
     """
     t_start = time.monotonic()
-    session_id = request.session_id or str(uuid.uuid4())
+    session_id = payload.session_id or str(uuid.uuid4())
 
     # ── Step 1: Detect and mask PII in a single Presidio call ────────────────
     # screen_pii calls /redact once so has_pii and safe_question come from the
     # same response. Calling detect_pii + mask_pii separately would make two
     # round-trips and allow a race on a flapping Presidio service (see ADR-0011).
-    has_pii, _, safe_question = await safety_service.screen_pii(request.question)
+    has_pii, _, safe_question = await safety_service.screen_pii(payload.question)
 
     # ── Step 2: Check the safe question for harmful content ───────────────────
     is_safe, unsafe_category = await safety_service.check_content_safety(safe_question)
@@ -53,7 +57,7 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
             answer=f"I'm unable to respond to this type of request ({unsafe_category}).",
             question_type=QuestionType.UNKNOWN,
             sources=[],
-            language=request.language,
+            language=payload.language,
             tokens_used=0,
             latency_ms=round((time.monotonic() - t_start) * 1000, 2),
             flagged_pii=has_pii,
@@ -69,7 +73,7 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     keyword_query = " ".join(keywords) if keywords else safe_question
 
     # ── Step 5: Hybrid search (vector + keyword) ──────────────────────────────
-    chunks = await search_service.hybrid_search(keyword_query, top_k=request.max_chunks)
+    chunks = await search_service.hybrid_search(keyword_query, top_k=payload.max_chunks)
 
     # ── Step 6: Expand context using graph neighbours ─────────────────────────
     if chunks:
@@ -84,7 +88,7 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     # ── Step 7: Generate answer from retrieved chunks ─────────────────────────
     total_tokens = 0
     answer, tokens = await llm_service.generate_answer(
-        safe_question, chunks, request.language
+        safe_question, chunks, payload.language
     )
     total_tokens += tokens
 

@@ -33,6 +33,9 @@ dependencies = [
     # ── Auth ───────────────────────────────────────────────────────────────────
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
+    # passlib's bcrypt backend hasn't been updated for bcrypt>=4.1's breaking changes
+    # (strict 72-byte secret limit, removed `__about__`) — pin below that line.
+    "bcrypt>=4.0.1,<4.1",
 
     # ── Config ─────────────────────────────────────────────────────────────────
     "pydantic-settings>=2.4.0",

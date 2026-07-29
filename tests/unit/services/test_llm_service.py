@@ -11,7 +11,7 @@ User journeys covered:
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from tests.conftest import make_chunk_result, make_openai_chat_response
+from tests.conftest import make_chunk_result_obj, make_openai_chat_response
 
 
 def _make_llm_mock(content: str, tokens: int = 100) -> MagicMock:
@@ -131,7 +131,7 @@ class TestGenerateAnswer:
             "Adults should take 500mg every 4–6 hours.", tokens=80
         )
 
-        chunks = [make_chunk_result()]
+        chunks = [make_chunk_result_obj()]
 
         with patch("backend.services.llm_service.get_openai_client", return_value=mock_client):
             from backend.services.llm_service import generate_answer
@@ -148,8 +148,8 @@ class TestGenerateAnswer:
         mock_client.chat.completions.create.return_value = _make_llm_mock("answer")
 
         chunks = [
-            make_chunk_result(content="Chunk A content"),
-            make_chunk_result(content="Chunk B content"),
+            make_chunk_result_obj(content="Chunk A content"),
+            make_chunk_result_obj(content="Chunk B content"),
         ]
 
         with patch("backend.services.llm_service.get_openai_client", return_value=mock_client):

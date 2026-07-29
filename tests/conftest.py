@@ -36,13 +36,43 @@ def make_chunk_result(
     content: str = "Take 500mg every 4 hours. Do not exceed 4g in 24 hours.",
     score: float = 0.95,
 ) -> dict:
+    """
+    A raw Azure AI Search result dict — key is "id" (matching the real index
+    schema in backend/pipeline/indexer.py and what search_service.py reads via
+    r["id"]), not "chunk_id" (that's ChunkResult's field name — see
+    make_chunk_result_obj for tests that need an actual typed object).
+    """
     return {
-        "chunk_id": chunk_id,
+        "id": chunk_id,
         "document_id": document_id,
         "filename": filename,
         "content": content,
         "score": score,
     }
+
+
+def make_chunk_result_obj(
+    chunk_id: str = "doc1_chunk_0",
+    document_id: str = "doc1",
+    filename: str = "paracetamol.pdf",
+    content: str = "Take 500mg every 4 hours. Do not exceed 4g in 24 hours.",
+    score: float = 0.95,
+):
+    """
+    A real ChunkResult instance — for tests mocking functions that return
+    list[ChunkResult] (e.g. search_service.hybrid_search) or that consume
+    ChunkResult objects directly (e.g. llm_service.generate_answer), where a
+    raw dict would fail on attribute access like `c.filename`.
+    """
+    from backend.models.qa import ChunkResult
+
+    return ChunkResult(
+        chunk_id=chunk_id,
+        document_id=document_id,
+        filename=filename,
+        content=content,
+        score=score,
+    )
 
 
 def make_openai_chat_response(content: str = "This medication is used to relieve pain.") -> MagicMock:
@@ -101,7 +131,17 @@ def mock_redis():
 
 @pytest.fixture
 def mock_mongo_collection():
-    """Mock Motor MongoDB collection with sensible defaults."""
+    """
+    Mock Motor MongoDB collection with sensible defaults.
+
+    find()/aggregate() and the cursor's sort()/skip()/limit() are all
+    synchronous in real Motor (they return a cursor/self immediately) — only
+    to_list() is async. They must be plain MagicMocks, not AsyncMocks: a child
+    attribute of an AsyncMock defaults to AsyncMock too, so leaving them
+    unset-to-MagicMock would make e.g. `col.find(query)` return a coroutine
+    instead of the cursor, breaking the real `.find().sort().skip().limit()`
+    chaining code relies on.
+    """
     col = AsyncMock()
     col.find_one.return_value = None
     col.insert_one.return_value = MagicMock(inserted_id="fake-id")
@@ -109,14 +149,14 @@ def mock_mongo_collection():
     col.delete_one.return_value = MagicMock(deleted_count=1)
     col.count_documents.return_value = 0
 
-    cursor = AsyncMock()
+    cursor = MagicMock()
     cursor.sort.return_value = cursor
     cursor.skip.return_value = cursor
     cursor.limit.return_value = cursor
-    cursor.to_list.return_value = []
-    col.find.return_value = cursor
-    col.aggregate.return_value = AsyncMock()
-    col.aggregate.return_value.to_list = AsyncMock(return_value=[])
+    cursor.to_list = AsyncMock(return_value=[])
+    col.find = MagicMock(return_value=cursor)
+
+    col.aggregate = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
     return col
 
 
@@ -152,6 +192,11 @@ async def client(mock_openai_client, mock_search_client, mock_redis, mock_db):
         from backend.main import create_app
         app = create_app()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            # Exposed so tests can use app.dependency_overrides[...] for auth —
+            # patch("...router.get_current_user", ...) does NOT work, because
+            # FastAPI's Depends(get_current_user) already bound the real function
+            # object at route-decoration time (router module import time).
+            ac.app = app
             yield ac
 
 
