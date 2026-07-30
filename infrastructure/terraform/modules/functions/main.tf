@@ -8,6 +8,10 @@ variable "storage_container_name" {
   type    = string
   default = "pil-documents"
 }
+variable "storage_processed_container_name" {
+  type    = string
+  default = "processed"
+}
 variable "cosmos_db_name" {
   type    = string
   default = "pil-knowledge-base"
@@ -76,6 +80,10 @@ resource "azurerm_linux_function_app" "document_processor" {
 
     STORAGE_CONNECTION     = "@Microsoft.KeyVault(SecretUri=${var.key_vault_uri}secrets/storage-connection-string/)"
     STORAGE_CONTAINER_NAME = var.storage_container_name
+    # Deliberately a separate container, not a "processed/" prefix inside
+    # STORAGE_CONTAINER_NAME — see stage7_archive.py's module docstring for
+    # the self-triggering reprocessing loop that caused (2026-07-30).
+    STORAGE_PROCESSED_CONTAINER_NAME = var.storage_processed_container_name
 
     APPLICATIONINSIGHTS_CONNECTION_STRING = "@Microsoft.KeyVault(SecretUri=${var.key_vault_uri}secrets/appinsights-connection-string/)"
   }

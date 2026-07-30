@@ -112,6 +112,112 @@ python tests/test_pure_logic.py       # 28 tests
 python tests/unit/ingest/test_chunking.py   # 8 tests — imports the real chunking stage
 ```
 
+### Live ingestion pipeline — manual scenario testing
+
+Unit tests cover pipeline logic in isolation; these scenarios exercise the
+*deployed* Function App end-to-end against real Azure resources. Useful
+after any change to `azure-functions/document_processor/` or its infra.
+
+Resource names (dev): storage account `stdevaz1dp001`, container
+`pil-documents`, Function App `func-doc-proc-pil-dev63u6v3` in resource
+group `rg-pil-dev`, Application Insights `appi-pil-dev`.
+
+Get the storage account key once per session and reuse it:
+```bash
+STORAGE_KEY=$(az storage account keys list --resource-group rsg-dev-az1-dp \
+  --account-name stdevaz1dp001 --query '[0].value' -o tsv)
+```
+
+**General verification pattern** — after any upload, check status in order
+of increasing detail:
+```bash
+# 1. Did the function even fire, and how? (EventGrid vs LogsAndContainerScan)
+az monitor app-insights query --app <app-insights-id> \
+  --analytics-query "traces | where timestamp > ago(5m) | where message contains '<document_id>' | order by timestamp desc | project timestamp, message"
+
+# 2. What's the document's final status?
+uv run python -c "
+import pymongo
+client = pymongo.MongoClient('<COSMOS_MONGO_CONNECTION from Key Vault>')
+print(client['pil-knowledge-base']['documents'].find_one({'document_id': '<document_id>'}))
+"
+
+# 3. Did the blob get archived (only happens on success)? Note: a SEPARATE
+#    container, not a "processed/" prefix inside pil-documents — see
+#    stage7_archive.py's module docstring for why.
+az storage blob list --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
+  --container-name processed --prefix "<document_id>/" -o table
+```
+
+#### Scenario 1 — Happy path (PDF)
+```bash
+az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
+  --container-name pil-documents --name "test-doc-1/sample.pdf" --file ./sample.pdf
+```
+Expect: trace shows `New blob detected(EventGrid)` within a few seconds →
+`Indexed N chunks` → `Successfully processed` → Mongo status `indexed` →
+blob present at `processed/test-doc-1/sample.pdf` (in the **processed**
+container, not `pil-documents`) and gone from `pil-documents/test-doc-1/sample.pdf`.
+
+#### Scenario 2 — DOCX / PPTX
+Same as Scenario 1 with a `.docx` or `.pptx` file, to exercise
+`stage1_extraction.py`'s format-specific branches.
+
+#### Scenario 3 — Invalid file (magic-byte mismatch)
+Upload a `.txt` file renamed to `.pdf` (content doesn't match extension):
+```bash
+az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
+  --container-name pil-documents --name "test-bad-magic/fake.pdf" --file ./notes.txt
+```
+Expect: fails fast (before any Azure OpenAI/Search calls) on
+`validate_magic_bytes`, Mongo status `failed` with a magic-byte error, blob
+stays at its original path (not moved — only successes get archived).
+
+#### Scenario 4 — Duplicate `document_id` (chunk ID collision)
+Upload two *different* files under the same folder:
+```bash
+az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
+  --container-name pil-documents --name "shared-id/a.pdf" --file ./a.pdf
+az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
+  --container-name pil-documents --name "shared-id/b.pdf" --file ./b.pdf
+```
+Expect: both compute overlapping search-document IDs
+(`shared-id_chunk_0`, `shared-id_chunk_1`, ...), so the second upload's
+chunks overwrite the first's. This is a known sharp edge, not a bug to
+fix here — always give unrelated files distinct top-level folders.
+
+#### Scenario 5 — Graph stage failure (best-effort, non-fatal)
+No special setup needed while `gremlinpython`'s aiohttp transport
+incompatibility is unresolved — every real upload exercises this path.
+Expect: trace shows `Graph build failed for <document_id>: ...` as a
+`warning`, but the document still reaches Mongo status `indexed` and gets
+archived normally. If this ever instead fails the whole document, that's
+a regression in `stage5_graph.py`'s try/except placement.
+
+#### Scenario 6 — Retry then poison queue
+Temporarily break something the pipeline needs (e.g. revoke the Function
+App's Key Vault role, or rename `COSMOS_DB_NAME`), then upload a file.
+Expect: `DequeueCount` increments across up to 5 execution attempts
+(visible in the trigger-details trace line), then
+`Message has reached MaxDequeueCount of 5. Moving message to queue
+'webjobs-blobtrigger-poison'`. Revert the breakage before re-testing —
+a poisoned message won't retry itself; re-upload (or copy-to-self) the
+blob to generate a fresh event.
+
+#### Scenario 7 — Trigger latency (Event Grid health check)
+Upload any file and note the wall-clock time between the upload command
+returning and the `New blob detected(EventGrid)` trace appearing. Expect
+low single-digit seconds. If it's consistently slow (tens of seconds or
+more), check the Event Grid subscription's health:
+```bash
+az eventgrid event-subscription show --name pil-documents-blob-created \
+  --source-resource-id "/subscriptions/<sub>/resourceGroups/rsg-dev-az1-dp/providers/Microsoft.Storage/storageAccounts/stdevaz1dp001" \
+  --query "provisioningState"
+```
+A slow-but-eventually-firing trigger with a healthy subscription usually
+means it silently fell back to `LogsAndContainerScan` — check the trace's
+`Reason=` text for which mechanism actually fired.
+
 ## Code Style
 
 - **Python**: `ruff` for lint + format, `mypy` for type checking

@@ -110,10 +110,22 @@ def _get_mongo_db():
 
 
 @lru_cache(maxsize=1)
-def _get_container_client() -> ContainerClient:
+def _get_source_container_client() -> ContainerClient:
     return ContainerClient.from_connection_string(
         os.environ["STORAGE_CONNECTION"],
         container_name=os.environ.get("STORAGE_CONTAINER_NAME", "pil-documents"),
+    )
+
+
+@lru_cache(maxsize=1)
+def _get_processed_container_client() -> ContainerClient:
+    # Deliberately a separate container from the ingestion one, not a
+    # "processed/" subfolder — see stage7_archive.py's module docstring for
+    # why (a same-container prefix caused a self-triggering reprocessing
+    # loop via the Event Grid subscription).
+    return ContainerClient.from_connection_string(
+        os.environ["STORAGE_CONNECTION"],
+        container_name=os.environ.get("STORAGE_PROCESSED_CONTAINER_NAME", "processed"),
     )
 
 
@@ -176,7 +188,9 @@ def process_document(blob: func.InputStream) -> None:
         update_document_status(db, document_id, "indexed", metadata)
         logger.info("Successfully processed %s → %d chunks", filename, len(chunks))
 
-        archive_processed_blob(_get_container_client(), document_id, filename, raw_bytes)
+        archive_processed_blob(
+            _get_source_container_client(), _get_processed_container_client(), document_id, filename, raw_bytes
+        )
         logger.info("Archived %s to processed/%s/%s", filename, document_id, filename)
 
     except Exception as exc:
