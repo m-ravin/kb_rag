@@ -173,18 +173,24 @@ Expect: fails fast (before any Azure OpenAI/Search calls) on
 `validate_magic_bytes`, Mongo status `failed` with a magic-byte error, blob
 stays at its original path (not moved — only successes get archived).
 
-#### Scenario 4 — Duplicate `document_id` (chunk ID collision)
-Upload two *different* files under the same folder:
+#### Scenario 4 — Two different files under the same folder (no longer collides)
 ```bash
 az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
   --container-name pil-documents --name "shared-id/a.pdf" --file ./a.pdf
 az storage blob upload --account-name stdevaz1dp001 --account-key "$STORAGE_KEY" \
   --container-name pil-documents --name "shared-id/b.pdf" --file ./b.pdf
 ```
-Expect: both compute overlapping search-document IDs
-(`shared-id_chunk_0`, `shared-id_chunk_1`, ...), so the second upload's
-chunks overwrite the first's. This is a known sharp edge, not a bug to
-fix here — always give unrelated files distinct top-level folders.
+Expect: two distinct `document_id`s (`shared-id-a-<hash>`,
+`shared-id-b-<hash>`) and two independently searchable sets of chunks.
+This used to silently collide — `document_id` was derived from the
+top-level folder only, so both files got the identical id and the second
+upload's chunks overwrote the first's Search entries at matching
+`chunk_index` positions. That actually happened in production (see
+`document_identity.py` and
+`docs/adr/0016-document-lifecycle-and-data-integrity.md`) before the id
+scheme was changed to include the filename. Re-uploading to the exact same
+`{folder}/{filename}` path twice is still an intentional upsert, not a
+collision — that's the desired "resubmit a corrected file" behavior.
 
 #### Scenario 5 — Graph stage failure (best-effort, non-fatal)
 No special setup needed while `gremlinpython`'s aiohttp transport
@@ -217,6 +223,148 @@ az eventgrid event-subscription show --name pil-documents-blob-created \
 A slow-but-eventually-firing trigger with a healthy subscription usually
 means it silently fell back to `LogsAndContainerScan` — check the trace's
 `Reason=` text for which mechanism actually fired.
+
+### Inspecting ingested data — chunks, metadata, and vectors directly
+
+The scenarios above confirm *that* a document processed successfully. To
+look at what actually landed in each store — the extracted metadata, the
+individual chunks, and whether the embeddings are really there — query the
+stores directly.
+
+**Get the Search admin key without touching Key Vault.** The Function App's
+Key Vault firewall only allows the Function App's own outbound IPs, so a
+`az keyvault secret show` for `search-api-key` (or `cosmos-mongo-connection-string`)
+from a local machine fails with `ForbiddenByFirewall`. Skip Key Vault
+entirely and pull the key straight from the Search resource instead — this
+is a direct ARM call, not a Key Vault read, so it isn't subject to that
+firewall:
+```bash
+SEARCH_KEY=$(az search admin-key show --service-name srch-dev-az1-dp \
+  --resource-group rsg-dev-az1-dp --query primaryKey -o tsv)
+```
+
+**1. Chunk count, metadata, and content preview** for a given document:
+```bash
+curl -s "https://srch-dev-az1-dp.search.windows.net/indexes/pil-documents/docs/search?api-version=2024-07-01" \
+  -H "api-key: $SEARCH_KEY" -H "Content-Type: application/json" \
+  -d '{"search": "*", "filter": "document_id eq '\''<document_id>'\''",
+       "select": "id,document_id,filename,chunk_index,indexed_at,metadata,content", "top": 50}'
+```
+`metadata` is a JSON string with `filename`, `file_type`, `page_count`, and
+(when extractable) `title`. Sort the results by `chunk_index` client-side —
+it's not marked `sortable` in the index, so `$orderby` on it returns a 400.
+
+**2. Confirm the vector is actually populated.** `content_vector` is
+`retrievable: false` in the schema (a deliberate write-only setting — it can
+be searched but not read back via `$select`), so you can't just fetch the
+raw array. Instead run a vector KNN query and confirm you get back distinct,
+non-zero cosine scores for the expected chunks — that only happens if real
+1536-dim embeddings are indexed:
+```bash
+python -c "
+import json, random
+random.seed(0)
+vec = [random.gauss(0, 1) for _ in range(1536)]
+norm = sum(v * v for v in vec) ** 0.5
+vec = [v / norm for v in vec]
+print(json.dumps({
+    'search': None,
+    'filter': \"document_id eq '<document_id>'\",
+    'select': 'id,chunk_index',
+    'vectorQueries': [{'kind': 'vector', 'vector': vec, 'fields': 'content_vector', 'k': 5}],
+}))
+" > query.json
+curl -s "https://srch-dev-az1-dp.search.windows.net/indexes/pil-documents/docs/search?api-version=2024-07-01" \
+  -H "api-key: $SEARCH_KEY" -H "Content-Type: application/json" -d @query.json
+```
+A random query vector isn't semantically meaningful, but Azure Search still
+returns its true nearest neighbors by cosine distance — non-zero, differing
+`@search.score` values across results is proof the embeddings are real, not
+that the query means anything.
+
+**3. Document status and extracted metadata in MongoDB:**
+```bash
+uv run python -c "
+import pymongo
+client = pymongo.MongoClient('<COSMOS_MONGO_CONNECTION from Key Vault>')
+print(client['pil-knowledge-base']['documents'].find_one({'document_id': '<document_id>'}))
+"
+```
+Note: as with Search, the Cosmos Mongo firewall only allows the Function
+App's outbound IPs — this one *does* need the connection string via Key
+Vault, and if your local IP isn't in the Cosmos Mongo firewall allowlist
+either, this will fail with a Forbidden/timeout, not just an empty result.
+Add your IP with `az cosmosdb mongocluster firewall rule create` if you need
+this check regularly; it's not required for the Search-based checks above.
+
+**Gotchas specific to git-bash on Windows, hit while writing these
+commands:**
+- Shell variables (`STORAGE_KEY`, `SEARCH_KEY`, etc.) do **not** persist
+  between separate Bash tool calls — only the working directory does. Any
+  script that spans multiple calls must re-source an env file (or re-run
+  `az ... show`) inside each call that needs the value.
+- When a curl response is piped to a *native Windows* Python (not one
+  running inside MSYS) via a file, use a real Windows-style path
+  (`C:/Users/...`) for both the `curl -o` output and the `python open(...)`
+  call. MSYS-style paths like `/tmp/...` or `/c/Users/...` are virtual
+  mappings that only MSYS-aware tools (bash, curl, git) understand — native
+  `python.exe` resolves them literally and fails with `FileNotFoundError`.
+
+### Document lifecycle — deletion, purge, and reconciliation
+
+See `docs/adr/0016-document-lifecycle-and-data-integrity.md` for the full
+rationale. Operationally:
+
+**Deleting a document** goes through `DELETE /manage/documents/{document_id}`
+(admin role required), never a direct blob/Search delete. It's a soft
+delete: the Mongo record gets `status="deleted"` (not removed), the Search
+chunks are removed immediately, and the blob moves from `processed/` (or
+`pil-documents/` if it never finished processing) to the `deleted/`
+container.
+
+**Purging** happens automatically: `purge_job.py` runs nightly at 03:00 UTC,
+hard-deletes anything in `deleted/` older than 7 days, and flips its Mongo
+record to `status="purged"`. A Blob Storage lifecycle-management policy on
+the same container (`infrastructure/terraform/modules/storage/main.tf`) is
+a redundant backstop, not the primary mechanism — if you need to check
+whether something was actually purged, check the Mongo record's `status`,
+not just whether the blob is gone.
+
+**Reconciliation** runs nightly at 02:00 UTC (`reconciliation_job.py`),
+diffing Mongo's `status="indexed"` document_ids against Search for the same
+`environment`. To run it manually against the live index instead of waiting
+for the schedule:
+```bash
+uv run python -c "
+import sys
+sys.path.insert(0, 'azure-functions/document_processor')
+import pymongo
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from reconciliation_job import reconcile
+
+mongo = pymongo.MongoClient('<COSMOS_MONGO_CONNECTION from Key Vault>')
+db = mongo['pil-knowledge-base']
+search = SearchClient(
+    endpoint='https://srch-dev-az1-dp.search.windows.net',
+    index_name='pil-documents',
+    credential=AzureKeyCredential('<SEARCH_KEY>'),
+)
+print(reconcile(db, search, 'dev'))
+"
+```
+A clean run returns `{"missing_from_search": [], "orphaned_in_search": []}`.
+Anything else means Mongo and Search have drifted — check the Function App's
+`AppTraces`/`AppExceptions` for the same time window before assuming which
+side is wrong.
+
+**Failure alerts** go to the email configured as `alert_email` in
+`modules/monitoring/main.tf` (default: the account owner's email) whenever
+`AppTraces`/`AppExceptions` shows `SeverityLevel >= 3` or a message
+containing `"Failed to process"` / `"Reconciliation drift"`. This is a
+Log Analytics-scoped scheduled query alert, not a classic Function App
+metric alert — the latter silently never fires against this App Insights
+resource (it's workspace-based; see the ADR).
 
 ## Code Style
 

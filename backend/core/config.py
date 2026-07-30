@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # ── Azure Data Lake Storage ───────────────────────────────────────────────
     storage_connection: str
     storage_container_name: str = "pil-documents"
+    storage_processed_container_name: str = "processed"
+    # Soft-delete holding area — see delete_document() in management/router.py
+    # and purge_job.py for the two-phase soft-delete/purge lifecycle.
+    storage_deleted_container_name: str = "deleted"
+
+    # Tags every Mongo/Search record; lets a future prod deployment filter
+    # dev-vs-prod traffic without a schema redesign.
+    environment: str = "dev"
 
     # ── Azure AI Content Safety ───────────────────────────────────────────────
     content_safety_endpoint: str = ""

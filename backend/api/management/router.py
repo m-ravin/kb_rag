@@ -201,12 +201,26 @@ async def delete_document(
     current_user: Annotated[dict, Depends(require_role("admin"))],
 ) -> dict:
     """
-    Fully removes a document from the knowledge base:
-      1. MongoDB tracking record
-      2. ADLS blob (source file)
-      3. Azure AI Search index chunks
-      4. Cosmos Gremlin graph vertices (best-effort)
+    Soft-deletes a document — nothing here is permanent:
+      1. MongoDB record marked status="deleted" (kept, not removed — an
+         audit trail of who deleted what and when)
+      2. Its archived blob is moved to the "deleted" holding container
+         (purge_job.py, a nightly timer function, hard-deletes it after a
+         7-day retention window — see
+         docs/adr/0016-document-lifecycle-and-data-integrity.md)
+      3. Azure AI Search index chunks removed immediately (these are a
+         derived/regenerable index, not the source of truth, so there's no
+         reason to soft-delete them too)
+      4. Cosmos Gremlin graph vertices dropped (best-effort; graph is
+         supplementary)
+
+    Previously this hard-deleted the Mongo record and the blob in one shot,
+    with no recovery window — soft-delete replaced that after this system's
+    storage account was found to have soft-delete disabled at the account
+    level too (now fixed separately, but app-level recoverability shouldn't
+    depend solely on that platform setting).
     """
+    from azure.core.exceptions import ResourceNotFoundError
     from azure.storage.blob.aio import BlobServiceClient
 
     db = get_db()
@@ -216,18 +230,45 @@ async def delete_document(
 
     s = get_settings()
 
-    # 1. Remove MongoDB record first so the document is immediately invisible
-    await db["documents"].delete_one({"document_id": document_id})
+    # 1. Mark deleted rather than removing the record — see docstring.
+    now = datetime.now(timezone.utc).isoformat()
+    await db["documents"].update_one(
+        {"document_id": document_id},
+        {"$set": {"status": "deleted", "deleted_at": now, "deleted_by": current_user["email"]}},
+    )
 
-    # 2. Delete the source blob from ADLS
+    # 2. Move the blob to the deleted/ holding container. Checked in this
+    # order because a successfully-processed document's blob has already
+    # been moved out of the source container by the Function App's archive
+    # step (stage7_archive.py) — only a document that failed processing (or
+    # is still mid-processing) would still have its blob in the source
+    # container. Download-then-upload-then-delete (not start_copy_from_url):
+    # both containers are private, and this mirrors the same approach
+    # stage7_archive.py already uses for source→processed moves.
     try:
         async with BlobServiceClient.from_connection_string(s.storage_connection) as blob_svc:
-            blob_client = blob_svc.get_blob_client(
-                container=s.storage_container_name, blob=doc["blob_path"]
-            )
-            await blob_client.delete_blob()
+            moved = False
+            for container_name in (s.storage_processed_container_name, s.storage_container_name):
+                src = blob_svc.get_blob_client(container=container_name, blob=doc["blob_path"])
+                try:
+                    downloader = await src.download_blob()
+                    data = await downloader.readall()
+                except ResourceNotFoundError:
+                    continue
+                dest = blob_svc.get_blob_client(
+                    container=s.storage_deleted_container_name, blob=doc["blob_path"]
+                )
+                await dest.upload_blob(data, overwrite=True)
+                await src.delete_blob()
+                moved = True
+                break
+            if not moved:
+                logger.warning(
+                    "No blob found to soft-delete for %s at path %s (checked %s and %s)",
+                    document_id, doc["blob_path"], s.storage_processed_container_name, s.storage_container_name,
+                )
     except Exception as exc:
-        logger.warning("Blob delete failed for %s: %s", document_id, exc)
+        logger.warning("Blob soft-delete failed for %s: %s", document_id, exc)
 
     # 3. Delete all search index chunks belonging to this document.
     # Track deleted IDs to avoid infinite loops: Azure Search is eventually consistent

@@ -12,6 +12,10 @@ variable "storage_processed_container_name" {
   type    = string
   default = "processed"
 }
+variable "storage_deleted_container_name" {
+  type    = string
+  default = "deleted"
+}
 variable "cosmos_db_name" {
   type    = string
   default = "pil-knowledge-base"
@@ -23,6 +27,14 @@ variable "search_index_name" {
 variable "embedding_model" {
   type    = string
   default = "text-embedding-3-small"
+}
+# Tags every Mongo/Search record so a future prod deployment of this same
+# module (a separate Function App + its own app_settings) can be given
+# environment = "prod" without any code change — see
+# docs/adr/0016-document-lifecycle-and-data-integrity.md.
+variable "environment" {
+  type    = string
+  default = "dev"
 }
 variable "tags" { type = map(string) }
 
@@ -84,8 +96,12 @@ resource "azurerm_linux_function_app" "document_processor" {
     # STORAGE_CONTAINER_NAME — see stage7_archive.py's module docstring for
     # the self-triggering reprocessing loop that caused (2026-07-30).
     STORAGE_PROCESSED_CONTAINER_NAME = var.storage_processed_container_name
+    # Soft-delete holding area — see purge_job.py.
+    STORAGE_DELETED_CONTAINER_NAME = var.storage_deleted_container_name
 
     APPLICATIONINSIGHTS_CONNECTION_STRING = "@Microsoft.KeyVault(SecretUri=${var.key_vault_uri}secrets/appinsights-connection-string/)"
+
+    ENVIRONMENT = var.environment
   }
 
   identity {

@@ -26,14 +26,19 @@ trigger it, structurally, regardless of any filter configuration.
 
 
 def archive_processed_blob(
-    source_container_client, dest_container_client, document_id: str, filename: str, data: bytes
+    source_container_client, dest_container_client, upload_folder: str, filename: str, data: bytes
 ) -> None:
     """
-    Moves a blob from the ingestion container's {document_id}/{filename}
+    Moves a blob from the ingestion container's {upload_folder}/{filename}
     path to the same path in the processed container. Copy-then-delete
     (Azure Blob has no native cross-container move), reusing the bytes
     already read into memory during processing instead of re-downloading.
+
+    Keyed by upload_folder (the human-chosen path component), not the
+    content-addressed document_id used for Search/Mongo — physical storage
+    layout stays human-browsable regardless of how document identity is
+    computed. See document_identity.py.
     """
-    path = f"{document_id}/{filename}"
+    path = f"{upload_folder}/{filename}"
     dest_container_client.upload_blob(name=path, data=data, overwrite=True)
     source_container_client.delete_blob(path)

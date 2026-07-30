@@ -13,6 +13,10 @@ def update_document_status(
     db,
     document_id: str,
     status: str,
+    *,
+    upload_folder: str | None = None,
+    filename: str | None = None,
+    environment: str | None = None,
     metadata: dict | None = None,
     error: str | None = None,
 ) -> None:
@@ -20,6 +24,18 @@ def update_document_status(
         "status": status,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if upload_folder is not None:
+        update["upload_folder"] = upload_folder
+    if filename is not None:
+        update["filename"] = filename
+    if upload_folder is not None and filename is not None:
+        # Same field name/shape the management-API upload path
+        # (backend/api/management/router.py) already writes, so purge_job.py
+        # and reconciliation_job.py can rely on one consistent field
+        # regardless of which of the two ingestion paths created the record.
+        update["blob_path"] = f"{upload_folder}/{filename}"
+    if environment is not None:
+        update["environment"] = environment
     if metadata:
         update["metadata"] = metadata
     if error:

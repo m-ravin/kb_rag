@@ -25,6 +25,14 @@ execution order (stage1 runs first, stage6 last):
   stage7_archive.py       — moves a successfully-processed blob out of the
                              ingestion path so it isn't reprocessed
 
+Two more modules run on a timer, independent of any single document's
+processing, so they don't fit the stage1..stage7 numbering either:
+  document_identity.py    — computes document_id (see its own docstring for
+                             the incident that made this necessary)
+  reconciliation_job.py    — nightly: flags drift between Mongo and Search
+  purge_job.py             — nightly: hard-deletes soft-deleted documents
+                              past their retention window
+
 Deliberately flat (not an ingest/ subpackage): the Azure Functions Consumption
 plan's remote build pipeline was observed to intermittently corrupt nested
 subdirectories in the deployed package (files ending up flattened with a
@@ -61,6 +69,9 @@ from gremlin_python.driver import client as gremlin_client
 from gremlin_python.driver import serializer
 from openai import AzureOpenAI
 
+from document_identity import compute_document_id
+from purge_job import purge_expired_deletions
+from reconciliation_job import reconcile
 from stage1_extraction import extract_content, validate_magic_bytes
 from stage2_chunking import chunk_text
 from stage3_embedding import embed_texts
@@ -82,6 +93,9 @@ logger = logging.getLogger(__name__)
 # real blob-trigger invocation while still only building it once per worker.
 
 _EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+# Tags every Mongo/Search record so a future prod index/DB can filter on it
+# without a schema redesign — see docs/adr/0016-document-lifecycle-and-data-integrity.md.
+_ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
 
 
 @lru_cache(maxsize=1)
@@ -129,6 +143,15 @@ def _get_processed_container_client() -> ContainerClient:
     )
 
 
+@lru_cache(maxsize=1)
+def _get_deleted_container_client() -> ContainerClient:
+    # Soft-delete holding area — see purge_job.py.
+    return ContainerClient.from_connection_string(
+        os.environ["STORAGE_CONNECTION"],
+        container_name=os.environ.get("STORAGE_DELETED_CONTAINER_NAME", "deleted"),
+    )
+
+
 def _new_gremlin_client() -> gremlin_client.Client:
     """Opens a fresh Gremlin connection — called once per document by graph.py."""
     return gremlin_client.Client(
@@ -164,36 +187,68 @@ def process_document(blob: func.InputStream) -> None:
     logger.info("Processing document: %s (%d bytes)", blob_name, blob.length)
 
     parts = blob_name.split("/")
-    document_id = parts[1] if len(parts) > 2 else "unknown"
+    upload_folder = parts[1] if len(parts) > 2 else "unknown"
     filename = parts[-1]
+    # Content-addressed (folder + filename) id — NOT just upload_folder. Using
+    # only the folder previously let two different files uploaded to the same
+    # folder collide on the same document_id and silently overwrite each
+    # other's Search chunks. See document_identity.py for the full rationale.
+    document_id = compute_document_id(upload_folder, filename)
 
     # Validate magic bytes before doing any parsing (MIME spoofing guard)
     raw_bytes = blob.read()
     validate_magic_bytes(raw_bytes, filename)
 
     db = _get_mongo_db()
-    update_document_status(db, document_id, "processing")
+    update_document_status(
+        db, document_id, "processing",
+        upload_folder=upload_folder, filename=filename, environment=_ENVIRONMENT,
+    )
 
     try:
         text, metadata = extract_content(raw_bytes, filename)
         chunks = chunk_text(text, chunk_size=512, overlap=64)
 
         vectors = embed_texts(_get_openai_client(), [c["text"] for c in chunks], _EMBEDDING_MODEL)
-        documents = build_search_documents(chunks, vectors, document_id, filename, metadata)
+        documents = build_search_documents(
+            chunks, vectors, document_id, upload_folder, filename, metadata, _ENVIRONMENT
+        )
         upload_to_search(_get_search_client(), documents)
         logger.info("Indexed %d chunks for document %s", len(documents), document_id)
 
         build_chunk_graph(_new_gremlin_client, chunks, document_id)
 
-        update_document_status(db, document_id, "indexed", metadata)
+        update_document_status(
+            db, document_id, "indexed",
+            upload_folder=upload_folder, filename=filename, environment=_ENVIRONMENT, metadata=metadata,
+        )
         logger.info("Successfully processed %s → %d chunks", filename, len(chunks))
 
         archive_processed_blob(
-            _get_source_container_client(), _get_processed_container_client(), document_id, filename, raw_bytes
+            _get_source_container_client(), _get_processed_container_client(), upload_folder, filename, raw_bytes
         )
-        logger.info("Archived %s to processed/%s/%s", filename, document_id, filename)
+        logger.info("Archived %s to processed/%s/%s", filename, upload_folder, filename)
 
     except Exception as exc:
         logger.exception("Failed to process %s: %s", blob_name, exc)
-        update_document_status(db, document_id, "failed", error=str(exc))
+        update_document_status(
+            db, document_id, "failed",
+            upload_folder=upload_folder, filename=filename, environment=_ENVIRONMENT, error=str(exc),
+        )
         raise
+
+
+# ── Lifecycle jobs: run on a schedule, independent of any single document ─────
+
+@app.timer_trigger(schedule="0 0 2 * * *", arg_name="reconcileTimer", run_on_startup=False, use_monitor=False)
+def reconciliation_job(reconcileTimer: func.TimerRequest) -> None:
+    """Nightly at 02:00 UTC — see reconciliation_job.py for what this checks and why."""
+    result = reconcile(_get_mongo_db(), _get_search_client(), _ENVIRONMENT)
+    logger.info("Reconciliation job complete: %s", result)
+
+
+@app.timer_trigger(schedule="0 0 3 * * *", arg_name="purgeTimer", run_on_startup=False, use_monitor=False)
+def purge_job(purgeTimer: func.TimerRequest) -> None:
+    """Nightly at 03:00 UTC (after reconciliation) — see purge_job.py."""
+    purged_count = purge_expired_deletions(_get_mongo_db(), _get_deleted_container_client())
+    logger.info("Purge job complete: %d document(s) purged", purged_count)

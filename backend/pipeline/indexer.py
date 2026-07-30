@@ -7,7 +7,6 @@ and making sure the vector search column is configured correctly.
 
 import logging
 
-from azure.core.exceptions import ResourceExistsError
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
@@ -41,11 +40,13 @@ async def ensure_search_index() -> None:
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="document_id", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="upload_folder", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="chunk_index", type=SearchFieldDataType.Int32),
         SearchableField(name="content", type=SearchFieldDataType.String),
         SimpleField(name="metadata", type=SearchFieldDataType.String),
         SimpleField(name="indexed_at", type=SearchFieldDataType.String),
+        SimpleField(name="environment", type=SearchFieldDataType.String, filterable=True),
         # The vector field — 1536 dimensions for text-embedding-3-small
         SearchField(
             name="content_vector",
@@ -68,9 +69,13 @@ async def ensure_search_index() -> None:
     )
 
     try:
-        index_client.create_index(index)
-        logger.info("Created Azure AI Search index: %s", s.azure_search_index_name)
-    except ResourceExistsError:
-        logger.info("Azure AI Search index already exists: %s", s.azure_search_index_name)
+        # create_or_update_index (not create_index) so schema additions here —
+        # e.g. new filterable fields — actually reach an already-existing
+        # index instead of silently no-op'ing on ResourceExistsError. Azure
+        # Search allows adding new fields to a live index without a rebuild;
+        # it rejects attribute changes on existing fields, which surfaces as
+        # a clear HttpResponseError rather than being swallowed here.
+        index_client.create_or_update_index(index)
+        logger.info("Ensured Azure AI Search index schema: %s", s.azure_search_index_name)
     except Exception as exc:
-        logger.warning("Could not create search index (will retry): %s", exc)
+        logger.warning("Could not create/update search index (will retry): %s", exc)

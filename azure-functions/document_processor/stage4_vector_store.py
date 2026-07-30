@@ -16,20 +16,24 @@ def build_search_documents(
     chunks: list[dict],
     vectors: list[list[float]],
     document_id: str,
+    upload_folder: str,
     filename: str,
     metadata: dict,
+    environment: str,
 ) -> list[dict]:
     """Pairs each chunk with its vector into an Azure AI Search document record."""
     return [
         {
             "id": f"{document_id}_chunk_{chunk['chunk_index']}",
             "document_id": document_id,
+            "upload_folder": upload_folder,
             "filename": filename,
             "chunk_index": chunk["chunk_index"],
             "content": chunk["text"],
             "content_vector": vector,
             "metadata": json.dumps(metadata),
             "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "environment": environment,
         }
         for chunk, vector in zip(chunks, vectors)
     ]
