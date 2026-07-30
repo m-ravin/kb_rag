@@ -14,3 +14,4 @@ output "primary_key" {
   sensitive = true
 }
 output "name" { value = data.azurerm_search_service.main.name }
+output "id" { value = data.azurerm_search_service.main.id }

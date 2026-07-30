@@ -131,4 +131,5 @@ resource "azurerm_linux_function_app" "document_processor" {
 
 output "function_app_url" { value = "https://${azurerm_linux_function_app.document_processor.default_hostname}" }
 output "function_app_name" { value = azurerm_linux_function_app.document_processor.name }
+output "function_app_id" { value = azurerm_linux_function_app.document_processor.id }
 output "function_app_principal_id" { value = azurerm_linux_function_app.document_processor.identity[0].principal_id }

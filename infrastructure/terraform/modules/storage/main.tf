@@ -69,6 +69,7 @@ resource "azurerm_storage_management_policy" "deleted_purge_backstop" {
 }
 
 output "storage_account_name" { value = data.azurerm_storage_account.main.name }
+output "storage_account_id" { value = data.azurerm_storage_account.main.id }
 output "storage_account_key" {
   value     = data.azurerm_storage_account.main.primary_access_key
   sensitive = true

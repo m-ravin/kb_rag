@@ -97,6 +97,26 @@ module "container_apps" {
   tags                       = var.tags
 }
 
+# ── Diagnostic settings — routes platform logs to Log Analytics ──────────────
+# See modules/diagnostics/main.tf for why this exists (an audit found zero
+# resources had this configured) and what's deliberately out of scope.
+module "diagnostics" {
+  source                     = "./modules/diagnostics"
+  log_analytics_workspace_id = module.monitoring.log_analytics_workspace_id
+  # Built from the resource group + known naming pattern rather than
+  # module.functions.function_app_id — referencing that output pulls the
+  # whole azurerm_linux_function_app resource into this apply's graph, and
+  # it currently has unrelated pre-existing site_config drift (found while
+  # wiring this up; flagged separately, not fixed here). This id string
+  # resolves to the identical resource without that side effect.
+  function_app_id    = "${azurerm_resource_group.main.id}/providers/Microsoft.Web/sites/func-doc-proc-${local.name_suffix}${random_string.suffix.result}"
+  storage_account_id = module.storage.storage_account_id
+  key_vault_id       = data.azurerm_key_vault.main.id
+  search_service_id  = module.search.id
+  cosmos_mongo_id    = "${azurerm_resource_group.main.id}/providers/Microsoft.DocumentDB/mongoClusters/cs-dev-az1-mongo"
+  cosmos_gremlin_id  = "${azurerm_resource_group.main.id}/providers/Microsoft.DocumentDb/databaseAccounts/cs-dev-az1-gremlin"
+}
+
 data "azurerm_client_config" "current" {}
 
 # ── Key Vault (reused, existing RBAC-authorization vault) ─────────────────────
