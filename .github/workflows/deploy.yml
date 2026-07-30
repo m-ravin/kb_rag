@@ -103,7 +103,8 @@ jobs:
               "$(kv_ref cosmos-gremlin-key cosmos-gremlin-key)" \
               "$(kv_ref redis-connection redis-connection-string)" \
               "$(kv_ref storage-connection storage-connection-string)" \
-              "$(kv_ref appinsights-connection appinsights-connection-string)"
+              "$(kv_ref appinsights-connection appinsights-connection-string)" \
+              "$(kv_ref jwt-secret jwt-secret)"
 
           az containerapp update \
             --name "${{ env.BACKEND_APP_NAME }}" \
@@ -120,7 +121,8 @@ jobs:
               COSMOS_GREMLIN_KEY=secretref:cosmos-gremlin-key \
               REDIS_CONNECTION=secretref:redis-connection \
               STORAGE_CONNECTION=secretref:storage-connection \
-              APPINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection
+              APPINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection \
+              JWT_SECRET=secretref:jwt-secret
 
   # ── Job 3: Deploy new images ──────────────────────────────────────────────────
   deploy:

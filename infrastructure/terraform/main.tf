@@ -231,3 +231,19 @@ resource "azurerm_key_vault_secret" "content_safety_endpoint" {
   value        = module.openai.content_safety_endpoint
   key_vault_id = data.azurerm_key_vault.main.id
 }
+
+# backend/core/config.py's jwt_secret has no default — Pydantic raises
+# ValidationError at startup without it. Found missing from both this file
+# and .github/workflows/deploy.yml's secret wiring while bringing the
+# Container Apps back up (2026-07-30): the backend would have crash-looped
+# on every deploy attempt with no existing signal pointing at why.
+resource "random_password" "jwt_secret" {
+  length  = 64
+  special = true
+}
+
+resource "azurerm_key_vault_secret" "jwt_secret" {
+  name         = "jwt-secret"
+  value        = random_password.jwt_secret.result
+  key_vault_id = data.azurerm_key_vault.main.id
+}
