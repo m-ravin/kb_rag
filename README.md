@@ -131,7 +131,8 @@ kb_rag/
 │       ├── stage3_embedding.py      # Chunk text → vectors (Azure OpenAI)
 │       ├── stage4_vector_store.py   # Builds + uploads Azure AI Search documents
 │       ├── stage5_graph.py          # Cosmos Gremlin chunk relationship graph
-│       └── stage6_status.py         # MongoDB document status updates
+│       ├── stage6_status.py         # MongoDB document status updates
+│       └── stage7_archive.py        # Moves processed blobs out of the ingestion path
 │       # Flat, not a subpackage, and numbered by execution order — Azure's
 │       # remote build pipeline was observed to intermittently corrupt nested
 │       # subdirectories in the deployed package. See function_app.py's

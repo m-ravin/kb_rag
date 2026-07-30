@@ -22,6 +22,8 @@ execution order (stage1 runs first, stage6 last):
                              the whole pipeline rather than being a one-shot
                              step, but is numbered last as the pipeline's
                              final write on success)
+  stage7_archive.py       — moves a successfully-processed blob out of the
+                             ingestion path so it isn't reprocessed
 
 Deliberately flat (not an ingest/ subpackage): the Azure Functions Consumption
 plan's remote build pipeline was observed to intermittently corrupt nested
@@ -54,6 +56,7 @@ import azure.functions as func
 import pymongo
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
+from azure.storage.blob import ContainerClient
 from gremlin_python.driver import client as gremlin_client
 from gremlin_python.driver import serializer
 from openai import AzureOpenAI
@@ -64,6 +67,7 @@ from stage3_embedding import embed_texts
 from stage4_vector_store import build_search_documents, upload_to_search
 from stage5_graph import build_chunk_graph
 from stage6_status import update_document_status
+from stage7_archive import archive_processed_blob
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,14 @@ def _get_mongo_db():
     # pymongo (sync) — motor (async) has no place in a sync function
     mongo_client = pymongo.MongoClient(os.environ["COSMOS_MONGO_CONNECTION"])
     return mongo_client[os.environ.get("COSMOS_DB_NAME", "pil-knowledge-base")]
+
+
+@lru_cache(maxsize=1)
+def _get_container_client() -> ContainerClient:
+    return ContainerClient.from_connection_string(
+        os.environ["STORAGE_CONNECTION"],
+        container_name=os.environ.get("STORAGE_CONTAINER_NAME", "pil-documents"),
+    )
 
 
 def _new_gremlin_client() -> gremlin_client.Client:
@@ -163,6 +175,9 @@ def process_document(blob: func.InputStream) -> None:
 
         update_document_status(db, document_id, "indexed", metadata)
         logger.info("Successfully processed %s → %d chunks", filename, len(chunks))
+
+        archive_processed_blob(_get_container_client(), document_id, filename, raw_bytes)
+        logger.info("Archived %s to processed/%s/%s", filename, document_id, filename)
 
     except Exception as exc:
         logger.exception("Failed to process %s: %s", blob_name, exc)
