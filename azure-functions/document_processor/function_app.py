@@ -221,6 +221,7 @@ def process_document(blob: func.InputStream) -> None:
         update_document_status(
             db, document_id, "indexed",
             upload_folder=upload_folder, filename=filename, environment=_ENVIRONMENT, metadata=metadata,
+            chunk_count=len(chunks),
         )
         logger.info("Successfully processed %s → %d chunks", filename, len(chunks))
 

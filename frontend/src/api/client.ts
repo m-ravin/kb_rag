@@ -63,7 +63,7 @@ export interface ChunkResult {
 export interface Document {
   document_id: string;
   filename: string;
-  status: "pending" | "processing" | "indexed" | "failed";
+  status: "pending" | "processing" | "indexed" | "failed" | "superseded" | "deleted" | "purged" | "unknown";
   metadata: Record<string, unknown>;
   chunk_count: number;
   created_at: string;

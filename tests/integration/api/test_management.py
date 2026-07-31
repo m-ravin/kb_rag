@@ -78,6 +78,69 @@ class TestDocumentUpload:
 
         assert response.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_upload_strips_path_segments_from_filename(self, client, admin_token, mock_db):
+        """
+        A filename containing "/" must be reduced to its basename before it's
+        used to build the blob path and compute document_id — otherwise the
+        blob path grows extra segments and the Function's
+        blob_name.split("/")[-1] parsing derives a different, shorter
+        filename than the one used here, reproducing the original dual-record
+        bug (see backend/core/document_identity.py's docstring).
+        """
+        mock_collection = AsyncMock()
+        mock_collection.insert_one.return_value = MagicMock(inserted_id="fake")
+        mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+
+        mock_user = {"email": "admin@test.com", "role": "admin"}
+        client.app.dependency_overrides[get_current_user] = lambda: mock_user
+
+        with patch("backend.api.management.router.get_db", return_value=mock_db), \
+             patch("azure.storage.blob.aio.BlobServiceClient") as mock_blob:
+
+            mock_blob_ctx = MagicMock()
+            mock_blob.from_connection_string.return_value.__aenter__ = AsyncMock(return_value=mock_blob_ctx)
+            mock_blob.from_connection_string.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_blob_ctx.get_blob_client.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+            mock_blob_ctx.get_blob_client.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            response = await client.post(
+                "/manage/documents/upload",
+                files={"file": ("../../etc/evil.pdf", b"%PDF-1.4 test content", "application/pdf")},
+                data={"title": "Path traversal filename"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["filename"] == "evil.pdf"
+        # insert_one is called twice on this shared mock (documents record,
+        # then the activity log) — the document record is the first call.
+        stored = mock_collection.insert_one.call_args_list[0][0][0]
+        assert stored["filename"] == "evil.pdf"
+        assert stored["blob_path"].endswith("/evil.pdf")
+        assert "/../" not in stored["blob_path"]
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_missing_filename(self, client, admin_token, mock_db):
+        """
+        A blank/whitespace-only filename must be rejected with 400, not crash.
+        (A truly empty filename isn't reachable over HTTP — multipart clients
+        treat a file part with no filename as a plain form field instead, so
+        FastAPI itself 422s before our handler runs. Whitespace-only is the
+        smallest input that still arrives as a genuine file part.)
+        """
+        mock_user = {"email": "admin@test.com", "role": "admin"}
+        client.app.dependency_overrides[get_current_user] = lambda: mock_user
+
+        response = await client.post(
+            "/manage/documents/upload",
+            files={"file": ("   ", b"%PDF-1.4 test content", "application/pdf")},
+            data={"title": "No filename"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+        assert response.status_code == 400
+
 
 class TestDocumentList:
 
@@ -132,6 +195,95 @@ class TestDocumentList:
         response = await client.get("/manage/documents")
 
         assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_list_falls_back_to_created_at_when_updated_at_missing(
+        self, client, viewer_token, mock_db
+    ):
+        """
+        A document missing updated_at (but with created_at) must still be
+        returned, using created_at as its updated_at — not silently dropped
+        from the list while still counting toward `total`.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        fake_docs = [
+            {
+                "document_id": "doc-legacy",
+                "filename": "legacy.pdf",
+                "status": "indexed",
+                "metadata": {},
+                "chunk_count": 5,
+                "created_at": now,
+                # no updated_at
+            }
+        ]
+
+        mock_collection = AsyncMock()
+        mock_collection.count_documents.return_value = 1
+        cursor = MagicMock()
+        cursor.sort.return_value = cursor
+        cursor.skip.return_value = cursor
+        cursor.limit.return_value = cursor
+        cursor.to_list = AsyncMock(return_value=fake_docs)
+        mock_collection.find = MagicMock(return_value=cursor)
+        mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+
+        mock_user = {"email": "viewer@test.com", "role": "viewer"}
+        client.app.dependency_overrides[get_current_user] = lambda: mock_user
+
+        with patch("backend.api.management.router.get_db", return_value=mock_db):
+            response = await client.get(
+                "/manage/documents",
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["documents"]) == 1
+        assert data["documents"][0]["document_id"] == "doc-legacy"
+
+    @pytest.mark.asyncio
+    async def test_list_maps_unrecognized_status_to_unknown_not_failed(
+        self, client, viewer_token, mock_db
+    ):
+        """
+        A raw status value not in the DocumentStatus enum must surface as
+        "unknown", not silently look like a processing failure ("failed").
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        fake_docs = [
+            {
+                "document_id": "doc-weird",
+                "filename": "weird.pdf",
+                "status": "some-future-status",
+                "metadata": {},
+                "chunk_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+
+        mock_collection = AsyncMock()
+        mock_collection.count_documents.return_value = 1
+        cursor = MagicMock()
+        cursor.sort.return_value = cursor
+        cursor.skip.return_value = cursor
+        cursor.limit.return_value = cursor
+        cursor.to_list = AsyncMock(return_value=fake_docs)
+        mock_collection.find = MagicMock(return_value=cursor)
+        mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+
+        mock_user = {"email": "viewer@test.com", "role": "viewer"}
+        client.app.dependency_overrides[get_current_user] = lambda: mock_user
+
+        with patch("backend.api.management.router.get_db", return_value=mock_db):
+            response = await client.get(
+                "/manage/documents",
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["documents"][0]["status"] == "unknown"
 
 
 class TestDocumentDelete:

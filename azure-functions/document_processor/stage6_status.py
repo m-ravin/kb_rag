@@ -19,6 +19,7 @@ def update_document_status(
     environment: str | None = None,
     metadata: dict | None = None,
     error: str | None = None,
+    chunk_count: int | None = None,
 ) -> None:
     update: dict[str, Any] = {
         "status": status,
@@ -40,6 +41,8 @@ def update_document_status(
         update["metadata"] = metadata
     if error:
         update["error"] = error
+    if chunk_count is not None:
+        update["chunk_count"] = chunk_count
 
     db["documents"].update_one(
         {"document_id": document_id},

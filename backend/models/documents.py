@@ -13,6 +13,9 @@ class DocumentStatus(str, Enum):
     INDEXED = "indexed"
     FAILED = "failed"
     SUPERSEDED = "superseded"
+    DELETED = "deleted"
+    PURGED = "purged"
+    UNKNOWN = "unknown"
 
 
 class DocumentUploadResponse(BaseModel):

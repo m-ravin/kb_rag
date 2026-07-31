@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { listDocuments, uploadDocument, deleteDocument, Document } from "../api/client";
-import { Upload, Trash2, CheckCircle, Clock, AlertCircle, Loader } from "lucide-react";
+import { Upload, Trash2, CheckCircle, Clock, AlertCircle, Loader, Archive, HelpCircle } from "lucide-react";
 import clsx from "clsx";
 
-const STATUS_ICON = {
+const STATUS_ICON: Record<Document["status"], JSX.Element> = {
   indexed: <CheckCircle size={14} className="text-green-500" />,
   pending: <Clock size={14} className="text-yellow-500" />,
   processing: <Loader size={14} className="text-blue-500 animate-spin" />,
   failed: <AlertCircle size={14} className="text-red-500" />,
+  superseded: <Archive size={14} className="text-gray-400" />,
+  deleted: <Trash2 size={14} className="text-gray-400" />,
+  purged: <Trash2 size={14} className="text-gray-300" />,
+  unknown: <HelpCircle size={14} className="text-gray-400" />,
 };
 
 export default function Documents() {
