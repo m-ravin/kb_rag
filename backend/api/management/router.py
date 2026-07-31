@@ -179,18 +179,22 @@ async def list_documents(
     cursor = db["documents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     docs_raw = await cursor.to_list(limit)
 
+    # Documents created by the CMS upload endpoint have top-level filename/created_at;
+    # documents created by the Function ingestion pipeline only set filename inside
+    # metadata and have no created_at at all — fall back to updated_at for those.
     documents = [
         DocumentRecord(
             document_id=d["document_id"],
-            filename=d["filename"],
+            filename=d.get("filename") or d.get("metadata", {}).get("filename", "unknown"),
             status=DocumentStatus(d.get("status", "pending")),
             metadata=d.get("metadata", {}),
             chunk_count=d.get("chunk_count", 0),
-            created_at=datetime.fromisoformat(d["created_at"]),
+            created_at=datetime.fromisoformat(d.get("created_at") or d["updated_at"]),
             updated_at=datetime.fromisoformat(d["updated_at"]),
             error=d.get("error"),
         )
         for d in docs_raw
+        if "updated_at" in d
     ]
     return DocumentListResponse(documents=documents, total=total, page=page, limit=limit)
 

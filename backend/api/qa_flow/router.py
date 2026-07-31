@@ -15,6 +15,7 @@ Think of it as a smart receptionist who takes your question, consults
 the right experts, and gives you a polished, safe, accurate answer.
 """
 
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from backend.models.qa import AskRequest, AskResponse, QuestionType
 from backend.services import llm_service, search_service, safety_service, monitoring_service
 
 router = APIRouter(prefix="/qa", tags=["Q&A Flow"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -76,9 +78,15 @@ async def ask(request: Request, payload: AskRequest) -> AskResponse:
     chunks = await search_service.hybrid_search(keyword_query, top_k=payload.max_chunks)
 
     # ── Step 6: Expand context using graph neighbours ─────────────────────────
+    # Best-effort enrichment: the answer is already answerable from the chunks
+    # found in Step 5, so a Gremlin outage shouldn't fail the whole request.
     if chunks:
         seed_ids = [c.chunk_id for c in chunks[:3]]
-        graph_chunks = await search_service.graph_search(seed_ids, top_k=2)
+        try:
+            graph_chunks = await search_service.graph_search(seed_ids, top_k=2)
+        except Exception:
+            logger.warning("graph_search failed, continuing without graph-expanded context", exc_info=True)
+            graph_chunks = []
         # Merge without duplicates
         existing_ids = {c.chunk_id for c in chunks}
         for gc in graph_chunks:
