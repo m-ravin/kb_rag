@@ -12,7 +12,7 @@ An end-to-end **Retrieval-Augmented Generation (RAG)** system for any knowledge 
    - The question is checked for PII and unsafe content — PII is **masked** before reaching the LLM
    - The question type is classified (FAQ / procedural / factual)
    - A hybrid search finds the most relevant document chunks
-   - GPT-4o reads those chunks and writes a clear, compliant answer
+   - Azure OpenAI reads those chunks and writes a clear, compliant answer
    - The answer is tuned, language-detected, logged, and returned
 
 ---
@@ -23,20 +23,20 @@ An end-to-end **Retrieval-Augmented Generation (RAG)** system for any knowledge 
 User Question
      │
      ▼
-[API Management]  ← rate limiting, auth gateway
+[In-app rate limiter (slowapi)]  ← no separate API gateway
      │
      ▼
-[Q&A Flow API]  (FastAPI on AKS)
-  ├─ PII Detection + Masking  →  [Presidio service — self-hosted sidecar pod in AKS]
-  │                                 (Docker Compose: presidio-service:8080 · AKS: ClusterIP, not public)
+[Q&A Flow API]  (FastAPI on Azure Container Apps)
+  ├─ PII Detection + Masking  →  [Presidio service — separate Container App, internal ingress only]
+  │                                 (Docker Compose: presidio-service:8080 · ACA: internal-only, not public)
   ├─ Content Safety check     →  [Azure AI Content Safety]
-  ├─ Question Type            →  [GPT-4o]
-  ├─ Keyword Extraction       →  [GPT-4o]
+  ├─ Question Type            →  [Azure OpenAI]
+  ├─ Keyword Extraction       →  [Azure OpenAI]
   ├─ Hybrid Search            →  [Azure AI Search] + [Cosmos Gremlin]
   │                                ↑ vectors from [Azure OpenAI Embeddings]
-  ├─ Answer Generation        →  [GPT-4o]
-  ├─ Wording Tuning           →  [GPT-4o]
-  ├─ Compliance Check         →  [GPT-4o]
+  ├─ Answer Generation        →  [Azure OpenAI]  (best-effort graph enrichment — degrades
+  ├─ Wording Tuning           →  [Azure OpenAI]   gracefully if Cosmos Gremlin is unavailable)
+  ├─ Compliance Check         →  [Azure OpenAI]
   └─ Logging (PII masked)     →  [Cosmos MongoDB]
      │
      ▼
@@ -62,9 +62,9 @@ Document Upload (CMS)
 
 | # | Azure Resource | Technical role | Explain like I'm 5 |
 |---|---|---|---|
-| 1 | **Azure Kubernetes Service** | Hosts FastAPI backend + React CMS frontend | The apartment building where all your apps live |
+| 1 | **Azure Container Apps** | Hosts FastAPI backend + React CMS frontend + Presidio, each as its own app in a shared environment | The apartment building where all your apps live |
 | 2 | **Azure AI Search** | Vector + BM25 + hybrid search over document chunks | The super-fast librarian who memorised every sentence |
-| 3 | **Azure OpenAI (GPT-4o)** | Answer generation, summarisation, compliance checking | The clever student who reads the notes and writes the answer |
+| 3 | **Azure OpenAI** | Answer generation, summarisation, compliance checking | The clever student who reads the notes and writes the answer |
 | 4 | **Azure OpenAI (Embeddings)** | Converts text to 1536-dimension vectors | The translator that turns words into numbers |
 | 5 | **Cosmos DB — MongoDB API** | Document metadata, user accounts, Q&A logs | The filing cabinet |
 | 6 | **Cosmos DB — Gremlin API** | Chunk-to-chunk relationship graph | A map showing how document pages connect |
@@ -73,18 +73,27 @@ Document Upload (CMS)
 | 9 | **Azure Functions** | Blob-triggered document processing pipeline | Little robots that wake up when a new document arrives |
 | 10 | **Azure Data Factory** | Orchestrates data pipelines | The assembly line foreman |
 | 11 | **Azure Key Vault** | Stores all secrets, accessed via managed identity | A locked safe — no passwords in code |
-| 12 | **Azure API Management** | Rate limiting, versioning, developer portal | The front-desk receptionist |
-| 13 | **Azure Container Registry** | Private Docker image storage | A private warehouse for packaged app versions |
-| 14 | **Azure Monitor + App Insights** | Logs, traces, metrics, dashboards | Security cameras watching everything |
-| 15 | **Azure AI Content Safety** | Input/output content screening | A school internet filter |
+| 12 | **Azure Container Registry** | Private Docker image storage | A private warehouse for packaged app versions |
+| 13 | **Azure Monitor + App Insights** | Logs, traces, metrics, dashboards | Security cameras watching everything |
+| 14 | **Azure AI Content Safety** | Input/output content screening | A school internet filter |
+
+> **Note — API Management and in-app rate limiting:**
+> An earlier iteration of this system used Azure API Management as a dedicated gateway.
+> It was dropped in favour of an in-process rate limiter (`slowapi`) on the FastAPI backend
+> itself — one fewer resource to provision and pay for, at the cost of losing a
+> developer-portal/versioning layer this project didn't need.
+> See [`docs/adr/0013-container-apps-over-aks-apim.md`](docs/adr/0013-container-apps-over-aks-apim.md).
 
 > **Note — Presidio PII service (self-hosted, not an Azure service):**
-> Presidio runs as a **separate container inside AKS** (ClusterIP — not publicly accessible).
-> It is built from `presidio-service/` and deployed alongside the FastAPI backend in the same
-> Kubernetes namespace. In local development it starts automatically via `docker-compose up`.
-> Because it runs on the same cluster, PII text never leaves the machine for an external API.
+> Presidio runs as its **own Azure Container App**, with internal-only ingress (not publicly
+> accessible outside the Container Apps Environment). It is built from `presidio-service/`
+> and deployed alongside the FastAPI backend in the same environment. In local development
+> it starts automatically via `docker-compose up`. Because it runs inside the same private
+> network, PII text never leaves the environment for an external API.
 > See [`docs/adr/0010-presidio-pii-microservice.md`](docs/adr/0010-presidio-pii-microservice.md)
-> for the decision rationale.
+> for the decision rationale and
+> [`docs/adr/0013-container-apps-over-aks-apim.md`](docs/adr/0013-container-apps-over-aks-apim.md)
+> for the AKS → Container Apps migration.
 
 ---
 
@@ -105,7 +114,7 @@ kb_rag/
 │   │   └── management/router.py     # /manage/* — CMS + monitoring
 │   ├── services/
 │   │   ├── search_service.py         # Vector / keyword / graph / hybrid search
-│   │   ├── llm_service.py            # All GPT-4o prompts
+│   │   ├── llm_service.py            # All Azure OpenAI prompts
 │   │   ├── safety_service.py         # PII masking + content safety
 │   │   └── monitoring_service.py     # Q&A logging + metrics aggregation
 │   └── pipeline/
@@ -139,21 +148,16 @@ kb_rag/
 │       # module docstring for details.
 │
 ├── infrastructure/
-│   ├── terraform/                   # Provisions all 15 Azure resources
-│   │   ├── main.tf                  # Root module — wires all child modules
-│   │   ├── variables.tf             # Input parameters (prefix, location, sizes)
-│   │   ├── outputs.tf               # Exports → auto-generates .env after apply
-│   │   └── modules/                 # aks, cosmos, search, openai, storage, redis,
-│   │                                #   functions, monitoring, networking, apim
-│   └── kubernetes/                  # K8s manifests for AKS deployment
-│       ├── backend-deployment.yaml  # Deployment + Service + HPA
-│       ├── frontend-deployment.yaml
-│       ├── ingress.yaml
-│       ├── namespace-and-config.yaml
-│       └── secret-provider-class.yaml.tpl  # Key Vault CSI driver template
+│   └── terraform/                   # Provisions all Azure resources
+│       ├── main.tf                  # Root module — wires all child modules
+│       ├── variables.tf             # Input parameters (prefix, location, sizes)
+│       ├── outputs.tf               # Exports → auto-generates .env after apply
+│       └── modules/                 # container_apps, cosmos, search, openai,
+│                                     #   storage, redis, functions, monitoring,
+│                                     #   diagnostics
 │
 ├── docs/
-│   ├── adr/                         # 10 Architecture Decision Records
+│   ├── adr/                         # 16 Architecture Decision Records
 │   │   └── README.md                # ADR index
 │   ├── CONTRIBUTING.md              # Development setup and workflow
 │   └── RUNBOOK.md                   # Deployment and operations guide
@@ -169,7 +173,7 @@ kb_rag/
 │
 ├── .github/workflows/
 │   ├── pr-review.yml                # Tests + lint + security + Claude AI review
-│   ├── deploy.yml                   # Docker build → ACR → AKS rolling deploy
+│   ├── deploy.yml                   # Docker build → ACR → Container Apps rolling deploy
 │   ├── terraform.yml                # Terraform plan/apply + GitHub secret sync
 │   └── e2e.yml                      # Playwright E2E tests on every PR
 │
@@ -192,7 +196,7 @@ kb_rag/
 ### Prerequisites
 
 - Azure subscription (with Azure OpenAI access approved)
-- `az` CLI, `terraform`, `kubectl`, `uv`, Node.js v20+, Docker
+- `az` CLI, `terraform`, `uv`, Node.js v20+, Docker
 
 ### 1. Clone and set up
 
@@ -227,12 +231,12 @@ docker-compose up
 # API docs: http://localhost:8000/docs
 ```
 
-### 5. Deploy to AKS
+### 5. Deploy to Azure Container Apps
 
-Push to `main` — GitHub Actions handles the rest:
-1. Syncs Key Vault secrets → Kubernetes Secret
-2. Builds Docker images → pushes to ACR
-3. Rolling deployment with health checks
+Trigger the `deploy.yml` workflow (manual `workflow_dispatch`) — it handles the rest:
+1. Builds Docker images (backend, frontend, presidio) → pushes to ACR
+2. Sets Container App secrets from Key Vault values
+3. Updates each Container App to the newly-built image
 
 ---
 
@@ -308,8 +312,8 @@ Push to `main` — GitHub Actions handles the rest:
 | `DELETE` | `/manage/documents/{id}` | Admin | Remove document — cascades to blob, search index, and graph |
 | `GET` | `/manage/activity-logs` | Admin | CMS activity audit log |
 | `GET` | `/manage/metrics` | Any auth | Q&A performance metrics |
-| `GET` | `/health` | — | Kubernetes liveness probe |
-| `GET` | `/ready` | — | Kubernetes readiness probe (checks Redis) |
+| `GET` | `/health` | — | Liveness probe |
+| `GET` | `/ready` | — | Readiness probe (checks Redis, when configured) |
 
 Full interactive docs available at `http://localhost:8000/docs` when running.
 
@@ -327,14 +331,13 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 |----------|-------------|
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint URL |
 | `AZURE_OPENAI_KEY` | Azure OpenAI API key |
-| `AZURE_OPENAI_GPT_DEPLOYMENT` | GPT model deployment name (default: `gpt-4o`) |
+| `AZURE_OPENAI_GPT_DEPLOYMENT` | GPT model deployment name (default: `gpt-5-mini`) — note: reasoning-family deployments reject a custom `temperature`, which `llm_service.py` accounts for |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Embedding model deployment name (default: `text-embedding-3-small`) |
 | `AZURE_SEARCH_ENDPOINT` | Azure AI Search endpoint URL |
 | `AZURE_SEARCH_KEY` | Azure AI Search API key |
 | `COSMOS_MONGO_CONNECTION` | Cosmos DB MongoDB API connection string |
 | `COSMOS_GREMLIN_ENDPOINT` | Cosmos DB Gremlin API WebSocket endpoint |
 | `COSMOS_GREMLIN_KEY` | Cosmos DB primary key |
-| `REDIS_CONNECTION` | Redis connection string (TLS, port 6380 in Azure) |
 | `STORAGE_CONNECTION` | Azure Data Lake Storage Gen2 connection string |
 | `JWT_SECRET` | Strong random string (≥32 chars) for signing JWT tokens — app refuses to start if unset |
 
@@ -343,9 +346,10 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AZURE_OPENAI_API_VERSION` | `2024-08-01-preview` | OpenAI API version |
-| `AZURE_SEARCH_INDEX_NAME` | `kb-documents` | Azure AI Search index name |
+| `AZURE_SEARCH_INDEX_NAME` | `pil-documents` | Azure AI Search index name |
 | `COSMOS_DB_NAME` | `pil-knowledge-base` | Cosmos MongoDB database name |
-| `STORAGE_CONTAINER_NAME` | `kb-documents` | ADLS container for uploaded files |
+| `REDIS_CONNECTION` | — | Redis connection string (TLS, port 6380 in Azure) — only used for Q&A result caching; the app starts and runs fine without it |
+| `STORAGE_CONTAINER_NAME` | `pil-documents` | ADLS container for uploaded files |
 | `CONTENT_SAFETY_ENDPOINT` | — | Azure AI Content Safety endpoint (for harmful content checks) |
 | `CONTENT_SAFETY_KEY` | — | Azure AI Content Safety key |
 | `APPINSIGHTS_CONNECTION_STRING` | — | Application Insights connection string |
@@ -364,7 +368,7 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | `pr-review.yml` | Every PR | Tests + Coverage, Linting, Security Scan, Claude AI Review |
 | `e2e.yml` | Every PR | Playwright E2E (38 tests, Chromium + Firefox + Mobile) |
 | `terraform.yml` | PR on `infrastructure/**` or manual dispatch | Terraform plan / apply / destroy |
-| `deploy.yml` | Push to `main` | Key Vault → K8s secret sync, Docker build → ACR, AKS rolling deploy |
+| `deploy.yml` | Manual `workflow_dispatch` | Docker build → ACR, set Container App secrets from Key Vault, update backend/frontend/presidio Container Apps to the new image |
 
 ### Required GitHub Secrets
 
@@ -373,14 +377,16 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | `AZURE_CREDENTIALS` | `az ad sp create-for-rbac --sdk-auth` |
 | `ARM_CLIENT_ID` / `ARM_CLIENT_SECRET` / `ARM_SUBSCRIPTION_ID` / `ARM_TENANT_ID` | Service principal |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API Keys |
-| `ACR_LOGIN_SERVER` / `AKS_CLUSTER_NAME` / `AKS_RESOURCE_GROUP` / `KEY_VAULT_URI` | Auto-set by `terraform.yml` after apply |
+| `ACR_LOGIN_SERVER` / `ACR_USERNAME` / `ACR_PASSWORD` | Auto-set by `terraform.yml` after apply |
+| `ACA_RESOURCE_GROUP` / `ACA_IDENTITY_ID` / `KEY_VAULT_URI` | Auto-set by `terraform.yml` after apply |
+| `ACA_BACKEND_APP_NAME` / `ACA_FRONTEND_APP_NAME` / `ACA_PRESIDIO_APP_NAME` | Auto-set by `terraform.yml` after apply |
 | `GH_PAT` | GitHub PAT with `repo` scope |
 
 ---
 
 ## Architecture Decision Records
 
-Ten ADRs in [`docs/adr/`](docs/adr/) document all major technical choices with rejected alternatives and rationale. See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development workflow and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for deployment procedures.
+Sixteen ADRs in [`docs/adr/`](docs/adr/) document all major technical choices with rejected alternatives and rationale, including the AKS → Container Apps migration (0013), reuse of existing dev-subscription resources (0014), and the document lifecycle/integrity design (0016). See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development workflow and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for deployment procedures.
 
 ---
 
@@ -396,17 +402,22 @@ Ten ADRs in [`docs/adr/`](docs/adr/) document all major technical choices with r
 
 ---
 
-## Cost Estimate (Azure, East US, dev tier)
+## Cost Estimate (Azure, dev tier)
 
 | Resource | SKU | Est. monthly |
 |---|---|---|
-| AKS (2× D4s_v3) | Standard | ~$280 |
+| Azure Container Apps (backend + frontend + presidio) | Consumption, scale-to-zero | ~$0–40 |
 | Azure AI Search | Standard (1 replica) | ~$245 |
 | Azure OpenAI | Pay-per-token | ~$50–200 |
 | Cosmos DB (400 RU/s × 2) | Provisioned | ~$50 |
 | Redis Cache | C1 Standard | ~$55 |
 | Azure Functions | Consumption | ~$0–5 |
 | Storage + Networking | Various | ~$20 |
-| **Total (dev)** | | **~$700–850/month** |
+| **Total (dev)** | | **~$420–615/month** |
+
+This project also reuses several existing dev-subscription resources (Search, Storage, Key
+Vault) rather than provisioning new ones — see
+[`docs/adr/0014-reuse-existing-dev-subscription-resources.md`](docs/adr/0014-reuse-existing-dev-subscription-resources.md).
+Actual cost depends on how much of that reuse applies to your subscription.
 
 Run `terraform destroy` when not in active use to avoid idle charges.

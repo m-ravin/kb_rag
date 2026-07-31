@@ -109,10 +109,16 @@ async def upload_document(
     The Azure Function is triggered automatically to process and index it.
     """
     from azure.storage.blob.aio import BlobServiceClient
+    from backend.core.document_identity import compute_document_id
 
     s = get_settings()
-    document_id = str(uuid.uuid4())
-    blob_path = f"{document_id}/{file.filename}"
+    upload_folder = str(uuid.uuid4())
+    # Same id the Function ingestion pipeline will compute for this exact
+    # upload_folder/filename, so the placeholder record created below is the
+    # SAME MongoDB document the Function later updates to "indexed" — not a
+    # second, disconnected record left permanently stuck at "pending".
+    document_id = compute_document_id(upload_folder, file.filename)
+    blob_path = f"{upload_folder}/{file.filename}"
 
     if file.content_type not in _MAGIC_BYTES:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
@@ -179,6 +185,13 @@ async def list_documents(
     cursor = db["documents"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     docs_raw = await cursor.to_list(limit)
 
+    def _safe_status(raw_status: str) -> DocumentStatus:
+        try:
+            return DocumentStatus(raw_status)
+        except ValueError:
+            logger.warning("unrecognized document status %r, defaulting to FAILED", raw_status)
+            return DocumentStatus.FAILED
+
     # Documents created by the CMS upload endpoint have top-level filename/created_at;
     # documents created by the Function ingestion pipeline only set filename inside
     # metadata and have no created_at at all — fall back to updated_at for those.
@@ -186,7 +199,7 @@ async def list_documents(
         DocumentRecord(
             document_id=d["document_id"],
             filename=d.get("filename") or d.get("metadata", {}).get("filename", "unknown"),
-            status=DocumentStatus(d.get("status", "pending")),
+            status=_safe_status(d.get("status", "pending")),
             metadata=d.get("metadata", {}),
             chunk_count=d.get("chunk_count", 0),
             created_at=datetime.fromisoformat(d.get("created_at") or d["updated_at"]),
