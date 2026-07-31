@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     azure_openai_endpoint: str
     azure_openai_key: str
-    azure_openai_gpt_deployment: str = "gpt-4o"
+    azure_openai_gpt_deployment: str = "gpt-5-mini"
     azure_openai_embedding_deployment: str = "text-embedding-3-small"
     azure_openai_api_version: str = "2024-08-01-preview"
 
@@ -31,11 +31,21 @@ class Settings(BaseSettings):
     cosmos_gremlin_graph: str = "chunk-graph"
 
     # ── Azure Cache for Redis ─────────────────────────────────────────────────
-    redis_connection: str
+    # Optional: only used for Q&A result caching (search_service.py). Not needed
+    # for the document ingestion pipeline. Leave unset until the Q&A/testing phase.
+    redis_connection: str | None = None
 
     # ── Azure Data Lake Storage ───────────────────────────────────────────────
     storage_connection: str
     storage_container_name: str = "pil-documents"
+    storage_processed_container_name: str = "processed"
+    # Soft-delete holding area — see delete_document() in management/router.py
+    # and purge_job.py for the two-phase soft-delete/purge lifecycle.
+    storage_deleted_container_name: str = "deleted"
+
+    # Tags every Mongo/Search record; lets a future prod deployment filter
+    # dev-vs-prod traffic without a schema redesign.
+    environment: str = "dev"
 
     # ── Azure AI Content Safety ───────────────────────────────────────────────
     content_safety_endpoint: str = ""

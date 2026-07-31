@@ -1,84 +1,22 @@
-name: Build and Deploy to AKS
+name: Build and Deploy to Container Apps
 
 # Manual trigger only — deployment requires explicit human confirmation.
-# Go to: Actions → "Build and Deploy to AKS" → "Run workflow"
+# Go to: Actions → "Build and Deploy to Container Apps" → "Run workflow"
 # CI (tests, lint, E2E) still runs automatically on every pull request.
 on:
   workflow_dispatch:
 
 env:
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
-  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+  RESOURCE_GROUP: ${{ secrets.ACA_RESOURCE_GROUP }}
   KEY_VAULT_URI: ${{ secrets.KEY_VAULT_URI }}
+  ACA_IDENTITY_ID: ${{ secrets.ACA_IDENTITY_ID }}
+  BACKEND_APP_NAME: ${{ secrets.ACA_BACKEND_APP_NAME }}
+  FRONTEND_APP_NAME: ${{ secrets.ACA_FRONTEND_APP_NAME }}
+  PRESIDIO_APP_NAME: ${{ secrets.ACA_PRESIDIO_APP_NAME }}
 
 jobs:
-  # ── Job 1: Sync Key Vault secrets → Kubernetes Secret ────────────────────────
-  # Runs BEFORE the deploy job so pods always have fresh credentials.
-  # No secret values ever appear in logs — az keyvault secret show pipes
-  # directly into kubectl, and all values are masked by Azure CLI.
-  sync-secrets:
-    name: Sync Key Vault → K8s Secrets
-    runs-on: ubuntu-latest
-    environment: production
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to Azure
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Get AKS credentials
-        run: |
-          az aks get-credentials \
-            --resource-group "${{ env.AKS_RESOURCE_GROUP }}" \
-            --name "${{ env.AKS_CLUSTER_NAME }}" \
-            --overwrite-existing
-
-      - name: Apply namespace and ConfigMap
-        run: kubectl apply -f infrastructure/kubernetes/namespace-and-config.yaml
-
-      # Pull each secret from Key Vault and create/update a Kubernetes Secret.
-      # kubectl create secret --dry-run=client | kubectl apply pipes the manifest
-      # through stdin so values never touch the filesystem.
-      - name: Create/update kb-rag-secrets Kubernetes Secret from Key Vault
-        env:
-          KV_NAME: ${{ env.KEY_VAULT_URI }}
-        run: |
-          KV=$(echo "$KV_NAME" | sed 's|https://||;s|.vault.azure.net/||')
-
-          fetch() { az keyvault secret show --vault-name "$KV" --name "$1" --query value -o tsv; }
-
-          kubectl create secret generic kb-rag-secrets \
-            --namespace kb-rag \
-            --from-literal=AZURE_OPENAI_KEY="$(fetch openai-api-key)" \
-            --from-literal=AZURE_OPENAI_ENDPOINT="$(fetch openai-endpoint)" \
-            --from-literal=AZURE_SEARCH_KEY="$(fetch search-api-key)" \
-            --from-literal=AZURE_SEARCH_ENDPOINT="$(fetch search-endpoint)" \
-            --from-literal=COSMOS_MONGO_CONNECTION="$(fetch cosmos-mongo-connection-string)" \
-            --from-literal=COSMOS_GREMLIN_ENDPOINT="$(fetch cosmos-gremlin-endpoint)" \
-            --from-literal=COSMOS_GREMLIN_KEY="$(fetch cosmos-gremlin-key)" \
-            --from-literal=REDIS_CONNECTION="$(fetch redis-connection-string)" \
-            --from-literal=STORAGE_CONNECTION="$(fetch storage-connection-string)" \
-            --from-literal=APPINSIGHTS_CONNECTION_STRING="$(fetch appinsights-connection-string)" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          echo "kb-rag-secrets synced from Key Vault: $KV"
-
-      # Apply SecretProviderClass so the CSI driver also mounts secrets as files
-      # (needed by any pod that uses volumeMounts for Key Vault access)
-      - name: Apply SecretProviderClass
-        run: |
-          if [ -f infrastructure/kubernetes/secret-provider-class.yaml ]; then
-            kubectl apply -f infrastructure/kubernetes/secret-provider-class.yaml
-          else
-            echo "secret-provider-class.yaml not found — skipping (run terraform apply first)"
-          fi
-
-  # ── Job 2: Build Docker images and push to ACR ────────────────────────────────
-  # Runs in parallel with sync-secrets (no dependency between them).
+  # ── Job 1: Build Docker images and push to ACR ────────────────────────────────
   build:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
@@ -122,51 +60,112 @@ jobs:
           cache-from: type=registry,ref=${{ env.ACR_LOGIN_SERVER }}/kb-rag-frontend:cache
           cache-to: type=registry,ref=${{ env.ACR_LOGIN_SERVER }}/kb-rag-frontend:cache,mode=max
 
-  # ── Job 3: Deploy to AKS ──────────────────────────────────────────────────────
-  # Waits for BOTH sync-secrets and build to complete before deploying.
-  deploy:
-    name: Deploy to AKS
+      - name: Build and push presidio-service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./presidio-service
+          file: ./presidio-service/Dockerfile
+          push: true
+          tags: ${{ env.ACR_LOGIN_SERVER }}/kb-rag-presidio:${{ steps.tag.outputs.tag }}
+          cache-from: type=registry,ref=${{ env.ACR_LOGIN_SERVER }}/kb-rag-presidio:cache
+          cache-to: type=registry,ref=${{ env.ACR_LOGIN_SERVER }}/kb-rag-presidio:cache,mode=max
+
+  # ── Job 2: Point each app's secrets at Key Vault (idempotent) ────────────────
+  # Container Apps reads secrets directly from Key Vault at runtime via the
+  # shared managed identity — values never pass through this workflow or its logs.
+  configure-secrets:
+    name: Configure Key Vault secret references
     runs-on: ubuntu-latest
-    needs: [sync-secrets, build]
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Log in to Azure
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Get AKS credentials
+      - name: Point backend secrets at Key Vault
         run: |
-          az aks get-credentials \
-            --resource-group "${{ env.AKS_RESOURCE_GROUP }}" \
-            --name "${{ env.AKS_CLUSTER_NAME }}" \
-            --overwrite-existing
+          kv_ref() { echo "$1=keyvaultref:${{ env.KEY_VAULT_URI }}secrets/$2,identityref:${{ env.ACA_IDENTITY_ID }}"; }
 
-      - name: Deploy backend (rolling update)
+          az containerapp secret set \
+            --name "${{ env.BACKEND_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --secrets \
+              "$(kv_ref openai-key openai-api-key)" \
+              "$(kv_ref openai-endpoint openai-endpoint)" \
+              "$(kv_ref content-safety-key content-safety-key)" \
+              "$(kv_ref content-safety-endpoint content-safety-endpoint)" \
+              "$(kv_ref search-key search-api-key)" \
+              "$(kv_ref search-endpoint search-endpoint)" \
+              "$(kv_ref cosmos-mongo-connection cosmos-mongo-connection-string)" \
+              "$(kv_ref cosmos-gremlin-endpoint cosmos-gremlin-endpoint)" \
+              "$(kv_ref cosmos-gremlin-key cosmos-gremlin-key)" \
+              "$(kv_ref redis-connection redis-connection-string)" \
+              "$(kv_ref storage-connection storage-connection-string)" \
+              "$(kv_ref appinsights-connection appinsights-connection-string)" \
+              "$(kv_ref jwt-secret jwt-secret)"
+
+          az containerapp update \
+            --name "${{ env.BACKEND_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --set-env-vars \
+              AZURE_OPENAI_KEY=secretref:openai-key \
+              AZURE_OPENAI_ENDPOINT=secretref:openai-endpoint \
+              CONTENT_SAFETY_KEY=secretref:content-safety-key \
+              CONTENT_SAFETY_ENDPOINT=secretref:content-safety-endpoint \
+              AZURE_SEARCH_KEY=secretref:search-key \
+              AZURE_SEARCH_ENDPOINT=secretref:search-endpoint \
+              COSMOS_MONGO_CONNECTION=secretref:cosmos-mongo-connection \
+              COSMOS_GREMLIN_ENDPOINT=secretref:cosmos-gremlin-endpoint \
+              COSMOS_GREMLIN_KEY=secretref:cosmos-gremlin-key \
+              REDIS_CONNECTION=secretref:redis-connection \
+              STORAGE_CONNECTION=secretref:storage-connection \
+              APPINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection \
+              JWT_SECRET=secretref:jwt-secret
+
+  # ── Job 3: Deploy new images ──────────────────────────────────────────────────
+  deploy:
+    name: Deploy new images to Container Apps
+    runs-on: ubuntu-latest
+    needs: [build, configure-secrets]
+    environment: production
+
+    steps:
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy presidio-service
         run: |
-          sed \
-            -e "s|REGISTRY_LOGIN_SERVER|${{ env.ACR_LOGIN_SERVER }}|g" \
-            -e "s|IMAGE_TAG|${{ needs.build.outputs.image_tag }}|g" \
-            infrastructure/kubernetes/backend-deployment.yaml | kubectl apply -f -
+          az containerapp update \
+            --name "${{ env.PRESIDIO_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --image "${{ env.ACR_LOGIN_SERVER }}/kb-rag-presidio:${{ needs.build.outputs.image_tag }}"
 
-      - name: Deploy frontend (rolling update)
+      - name: Deploy backend
         run: |
-          sed \
-            -e "s|REGISTRY_LOGIN_SERVER|${{ env.ACR_LOGIN_SERVER }}|g" \
-            -e "s|IMAGE_TAG|${{ needs.build.outputs.image_tag }}|g" \
-            infrastructure/kubernetes/frontend-deployment.yaml | kubectl apply -f -
+          az containerapp update \
+            --name "${{ env.BACKEND_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --image "${{ env.ACR_LOGIN_SERVER }}/kb-rag-backend:${{ needs.build.outputs.image_tag }}"
 
-      - name: Apply ingress
-        run: kubectl apply -f infrastructure/kubernetes/ingress.yaml
-
-      - name: Wait for rollout
+      - name: Deploy frontend
         run: |
-          kubectl rollout status deployment/kb-rag-backend  -n kb-rag --timeout=180s
-          kubectl rollout status deployment/kb-rag-frontend -n kb-rag --timeout=180s
+          az containerapp update \
+            --name "${{ env.FRONTEND_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --image "${{ env.ACR_LOGIN_SERVER }}/kb-rag-frontend:${{ needs.build.outputs.image_tag }}"
 
-      - name: Print pod status
+      - name: Print revision status
         if: always()
-        run: kubectl get pods -n kb-rag -o wide
+        run: |
+          for app in "${{ env.PRESIDIO_APP_NAME }}" "${{ env.BACKEND_APP_NAME }}" "${{ env.FRONTEND_APP_NAME }}"; do
+            echo "--- $app ---"
+            az containerapp revision list \
+              --name "$app" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --query "[0].{name:name, active:properties.active, healthState:properties.healthState, replicas:properties.replicas}" \
+              -o table
+          done

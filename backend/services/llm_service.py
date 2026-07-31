@@ -19,17 +19,23 @@ from backend.models.qa import ChunkResult, QuestionType
 logger = logging.getLogger(__name__)
 
 
-async def _chat(system: str, user: str, temperature: float = 0.3) -> tuple[str, int]:
-    """Base helper: sends a system + user message to GPT-4o and returns the reply."""
+async def _chat(system: str, user: str, temperature: float | None = None) -> tuple[str, int]:
+    """
+    Base helper: sends a system + user message to GPT-4o and returns the reply.
+
+    gpt-5-mini (a reasoning-family model) rejects any non-default temperature,
+    so `temperature` is only sent to the API when explicitly requested.
+    """
     client = get_openai_client()
     s = get_settings()
+    kwargs = {"temperature": temperature} if temperature is not None else {}
     response = await client.chat.completions.create(
         model=s.azure_openai_gpt_deployment,
-        temperature=temperature,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        **kwargs,
     )
     text = response.choices[0].message.content or ""
     tokens = response.usage.total_tokens if response.usage else 0
@@ -45,7 +51,7 @@ async def detect_question_type(question: str) -> QuestionType:
         "You are a question classifier. Classify the user's question into exactly one of: "
         "faq, procedural, factual, comparison, unknown. Reply with only the category word."
     )
-    raw, _ = await _chat(system, question, temperature=0.0)
+    raw, _ = await _chat(system, question)
     try:
         return QuestionType(raw.strip().lower())
     except ValueError:
@@ -61,7 +67,7 @@ async def extract_keywords(question: str) -> list[str]:
         "Extract 3-7 key search terms from the user's question. "
         "Reply with a comma-separated list of terms only."
     )
-    raw, _ = await _chat(system, question, temperature=0.0)
+    raw, _ = await _chat(system, question)
     return [kw.strip() for kw in raw.split(",") if kw.strip()]
 
 
@@ -94,7 +100,7 @@ async def generate_answer(
         f"Respond in language: {language}. Be clear, accurate, and concise."
     )
     user = f"{_CTX_START}\n{context}\n{_CTX_END}\n\nQuestion: {question}"
-    answer, tokens = await _chat(system, user, temperature=0.2)
+    answer, tokens = await _chat(system, user)
     return answer, tokens
 
 
@@ -104,7 +110,7 @@ async def summarise_text(text: str, max_sentences: int = 5) -> tuple[str, int]:
     Like asking someone to explain a book in 5 sentences.
     """
     system = f"Summarise the following text in at most {max_sentences} sentences."
-    return await _chat(system, text, temperature=0.3)
+    return await _chat(system, text)
 
 
 async def tune_wording(text: str, tone: str = "professional") -> tuple[str, int]:
@@ -116,7 +122,7 @@ async def tune_wording(text: str, tone: str = "professional") -> tuple[str, int]
         f"Rewrite the following text in a {tone} tone. "
         "Keep the meaning exactly the same. Do not add or remove facts."
     )
-    return await _chat(system, text, temperature=0.4)
+    return await _chat(system, text)
 
 
 async def translate_text(text: str, target_language: str) -> tuple[str, int]:
@@ -129,7 +135,7 @@ async def translate_text(text: str, target_language: str) -> tuple[str, int]:
         "Preserve technical and medical terms accurately. "
         "Return only the translated text."
     )
-    return await _chat(system, text, temperature=0.1)
+    return await _chat(system, text)
 
 
 async def check_compliance(text: str) -> tuple[bool, str]:
@@ -144,7 +150,7 @@ async def check_compliance(text: str) -> tuple[bool, str]:
         "3) No definitive diagnostic statements. "
         "Reply with JSON: {\"compliant\": true/false, \"reason\": \"...\"}"
     )
-    raw, _ = await _chat(system, text, temperature=0.0)
+    raw, _ = await _chat(system, text)
     try:
         result = json.loads(raw)
         return result.get("compliant", True), result.get("reason", "")
@@ -161,5 +167,5 @@ async def detect_language(text: str) -> str:
         "Identify the language of the following text. "
         "Reply with only the ISO 639-1 two-letter language code (e.g. 'en', 'ms', 'zh')."
     )
-    raw, _ = await _chat(system, text[:200], temperature=0.0)
+    raw, _ = await _chat(system, text[:200])
     return raw.strip().lower()[:2]

@@ -125,7 +125,18 @@ kb_rag/
 │
 ├── azure-functions/
 │   └── document_processor/
-│       └── function.py              # Blob-triggered: extract → chunk → embed → index
+│       ├── function_app.py          # Blob trigger — wires the stages below together
+│       ├── stage1_extraction.py     # PDF/DOCX/PPTX text extraction + magic-byte check
+│       ├── stage2_chunking.py       # Splits text into overlapping chunks
+│       ├── stage3_embedding.py      # Chunk text → vectors (Azure OpenAI)
+│       ├── stage4_vector_store.py   # Builds + uploads Azure AI Search documents
+│       ├── stage5_graph.py          # Cosmos Gremlin chunk relationship graph
+│       ├── stage6_status.py         # MongoDB document status updates
+│       └── stage7_archive.py        # Moves processed blobs out of the ingestion path
+│       # Flat, not a subpackage, and numbered by execution order — Azure's
+│       # remote build pipeline was observed to intermittently corrupt nested
+│       # subdirectories in the deployed package. See function_app.py's
+│       # module docstring for details.
 │
 ├── infrastructure/
 │   ├── terraform/                   # Provisions all 15 Azure resources

@@ -10,7 +10,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import make_chunk_result, make_openai_embedding_response
+from tests.conftest import make_chunk_result, make_chunk_result_obj, make_openai_embedding_response
 
 
 def _make_async_search_results(chunks: list[dict]):
@@ -54,10 +54,12 @@ class TestVectorSearch:
         When Redis has a cached result, OpenAI embeddings must NOT be called.
         This is the core Redis cache optimisation — must hold.
         """
-        cached = [make_chunk_result()]
+        # The cache stores ChunkResult.model_dump() output (key "chunk_id"), not raw
+        # Azure Search results (key "id") — make_chunk_result_obj() matches that shape.
+        cached = [make_chunk_result_obj().model_dump()]
         mock_openai = AsyncMock()
         mock_redis = AsyncMock()
-        mock_redis.get.return_value = json.dumps([c for c in cached])
+        mock_redis.get.return_value = json.dumps(cached)
 
         with patch("backend.services.search_service.get_openai_client", return_value=mock_openai), \
              patch("backend.services.search_service.get_redis_client", return_value=mock_redis):

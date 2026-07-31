@@ -1,21 +1,17 @@
-variable "resource_group_name" { type = string }
-variable "location" { type = string }
-variable "name_suffix" { type = string }
-variable "tags" { type = map(string) }
+variable "existing_name" { type = string }
+variable "existing_resource_group_name" { type = string }
 
-resource "azurerm_search_service" "main" {
-  name                = "srch-${var.name_suffix}"
-  resource_group_name = var.resource_group_name
-  location            = var.location
-  sku                 = "standard"
-  replica_count       = 1
-  partition_count     = 1
-
-  # Allow both API key and AAD auth
-  local_authentication_enabled = true
-  tags                         = var.tags
+# Reuses the pre-provisioned Free-tier Search service in rsg-dev-az1-dp rather than
+# creating a new one — see docs/adr/0014-reuse-existing-dev-subscription-resources.md
+data "azurerm_search_service" "main" {
+  name                = var.existing_name
+  resource_group_name = var.existing_resource_group_name
 }
 
-output "endpoint"    { value = "https://${azurerm_search_service.main.name}.search.windows.net" }
-output "primary_key" { value = azurerm_search_service.main.primary_key; sensitive = true }
-output "name"        { value = azurerm_search_service.main.name }
+output "endpoint" { value = "https://${data.azurerm_search_service.main.name}.search.windows.net" }
+output "primary_key" {
+  value     = data.azurerm_search_service.main.primary_key
+  sensitive = true
+}
+output "name" { value = data.azurerm_search_service.main.name }
+output "id" { value = data.azurerm_search_service.main.id }

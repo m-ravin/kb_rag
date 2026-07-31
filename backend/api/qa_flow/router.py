@@ -15,6 +15,7 @@ Think of it as a smart receptionist who takes your question, consults
 the right experts, and gives you a polished, safe, accurate answer.
 """
 
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,23 +27,28 @@ from backend.models.qa import AskRequest, AskResponse, QuestionType
 from backend.services import llm_service, search_service, safety_service, monitoring_service
 
 router = APIRouter(prefix="/qa", tags=["Q&A Flow"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/ask", response_model=AskResponse)
 @limiter.limit("30/minute")
-async def ask(http_request: Request, request: AskRequest) -> AskResponse:
+async def ask(request: Request, payload: AskRequest) -> AskResponse:
     """
     Full RAG pipeline: question → safety → search → LLM → answer.
     This is the endpoint the chat UI calls.
+
+    The Starlette Request must be named `request` (not `http_request`) — slowapi's
+    @limiter.limit decorator looks for a parameter literally named `request` to find
+    it, and grabs the wrong one (silently) if the body model claims that name instead.
     """
     t_start = time.monotonic()
-    session_id = request.session_id or str(uuid.uuid4())
+    session_id = payload.session_id or str(uuid.uuid4())
 
     # ── Step 1: Detect and mask PII in a single Presidio call ────────────────
     # screen_pii calls /redact once so has_pii and safe_question come from the
     # same response. Calling detect_pii + mask_pii separately would make two
     # round-trips and allow a race on a flapping Presidio service (see ADR-0011).
-    has_pii, _, safe_question = await safety_service.screen_pii(request.question)
+    has_pii, _, safe_question = await safety_service.screen_pii(payload.question)
 
     # ── Step 2: Check the safe question for harmful content ───────────────────
     is_safe, unsafe_category = await safety_service.check_content_safety(safe_question)
@@ -53,7 +59,7 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
             answer=f"I'm unable to respond to this type of request ({unsafe_category}).",
             question_type=QuestionType.UNKNOWN,
             sources=[],
-            language=request.language,
+            language=payload.language,
             tokens_used=0,
             latency_ms=round((time.monotonic() - t_start) * 1000, 2),
             flagged_pii=has_pii,
@@ -69,12 +75,18 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     keyword_query = " ".join(keywords) if keywords else safe_question
 
     # ── Step 5: Hybrid search (vector + keyword) ──────────────────────────────
-    chunks = await search_service.hybrid_search(keyword_query, top_k=request.max_chunks)
+    chunks = await search_service.hybrid_search(keyword_query, top_k=payload.max_chunks)
 
     # ── Step 6: Expand context using graph neighbours ─────────────────────────
+    # Best-effort enrichment: the answer is already answerable from the chunks
+    # found in Step 5, so a Gremlin outage shouldn't fail the whole request.
     if chunks:
         seed_ids = [c.chunk_id for c in chunks[:3]]
-        graph_chunks = await search_service.graph_search(seed_ids, top_k=2)
+        try:
+            graph_chunks = await search_service.graph_search(seed_ids, top_k=2)
+        except Exception:
+            logger.warning("graph_search failed, continuing without graph-expanded context", exc_info=True)
+            graph_chunks = []
         # Merge without duplicates
         existing_ids = {c.chunk_id for c in chunks}
         for gc in graph_chunks:
@@ -84,7 +96,7 @@ async def ask(http_request: Request, request: AskRequest) -> AskResponse:
     # ── Step 7: Generate answer from retrieved chunks ─────────────────────────
     total_tokens = 0
     answer, tokens = await llm_service.generate_answer(
-        safe_question, chunks, request.language
+        safe_question, chunks, payload.language
     )
     total_tokens += tokens
 

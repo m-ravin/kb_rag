@@ -19,3 +19,7 @@ Each ADR explains *what* was decided, *why*, and what alternatives were rejected
 | [0010](0010-presidio-pii-microservice.md) | Presidio PII detection — standalone microservice instead of in-process library | accepted | 2026-05-11 |
 | [0011](0011-pii-fail-closed-policy.md) | PII fail-closed policy — block Q&A on Presidio outage rather than pass raw PII | accepted | 2026-05-11 |
 | [0012](0012-security-hardening.md) | Security hardening — rate limiting, auth scope, JWT hardening, upload validation | accepted | 2026-05-11 |
+| [0013](0013-container-apps-over-aks-apim.md) | Azure Container Apps replaces AKS + API Management | accepted | 2026-07-21 |
+| [0014](0014-reuse-existing-dev-subscription-resources.md) | Reuse pre-provisioned resources from the dev subscription where compatible | accepted | 2026-07-21 |
+| [0015](0015-key-vault-firewall-ip-rules-manual.md) | Key Vault firewall IP rules for the Function App are provisioned manually, not via Terraform | accepted | 2026-07-29 |
+| [0016](0016-document-lifecycle-and-data-integrity.md) | Document identity, deletion lifecycle, and data integrity — content-addressed ids, soft-delete/purge, reconciliation, alerting | accepted | 2026-07-30 |
