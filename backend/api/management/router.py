@@ -47,6 +47,23 @@ _MAGIC_BYTES: dict[str, bytes] = {
 }
 
 
+def _sanitize_filename(raw: str | None) -> str:
+    """
+    Reduces the uploaded filename to a bare basename before it's used to
+    build the blob path and compute_document_id(). The Function pipeline
+    derives its filename the same way — via blob_name.split("/")[-1] — so a
+    filename containing "/" (or a missing filename) would otherwise make the
+    two sides compute different document_ids for the same upload, exactly
+    the bug this endpoint was fixed to avoid.
+    """
+    if not raw or not raw.strip():
+        raise HTTPException(status_code=400, detail="Filename is required")
+    name = raw.strip().replace("\\", "/").split("/")[-1]
+    if not name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return name
+
+
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, description="Minimum 12 characters")
@@ -113,12 +130,13 @@ async def upload_document(
 
     s = get_settings()
     upload_folder = str(uuid.uuid4())
+    filename = _sanitize_filename(file.filename)
     # Same id the Function ingestion pipeline will compute for this exact
     # upload_folder/filename, so the placeholder record created below is the
     # SAME MongoDB document the Function later updates to "indexed" — not a
     # second, disconnected record left permanently stuck at "pending".
-    document_id = compute_document_id(upload_folder, file.filename)
-    blob_path = f"{upload_folder}/{file.filename}"
+    document_id = compute_document_id(upload_folder, filename)
+    blob_path = f"{upload_folder}/{filename}"
 
     if file.content_type not in _MAGIC_BYTES:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
@@ -145,7 +163,7 @@ async def upload_document(
     await db["documents"].insert_one(
         {
             "document_id": document_id,
-            "filename": file.filename,
+            "filename": filename,
             "title": title,
             "version": version,
             "status": "pending",
@@ -157,11 +175,11 @@ async def upload_document(
     )
 
     await _log_activity(db, "upload", document_id, current_user["email"],
-                        {"filename": file.filename, "version": version})
+                        {"filename": filename, "version": version})
 
     return DocumentUploadResponse(
         document_id=document_id,
-        filename=file.filename,
+        filename=filename,
         status=DocumentStatus.PENDING,
         message="Upload successful. Document is being processed and indexed.",
     )
@@ -189,26 +207,36 @@ async def list_documents(
         try:
             return DocumentStatus(raw_status)
         except ValueError:
-            logger.warning("unrecognized document status %r, defaulting to FAILED", raw_status)
-            return DocumentStatus.FAILED
+            # UNKNOWN, not FAILED: defaulting to FAILED would make an
+            # unrecognized-but-benign status (e.g. a future status value)
+            # look like a processing failure to the CMS user.
+            logger.warning("unrecognized document status %r, defaulting to UNKNOWN", raw_status)
+            return DocumentStatus.UNKNOWN
 
     # Documents created by the CMS upload endpoint have top-level filename/created_at;
     # documents created by the Function ingestion pipeline only set filename inside
     # metadata and have no created_at at all — fall back to updated_at for those.
-    documents = [
-        DocumentRecord(
-            document_id=d["document_id"],
-            filename=d.get("filename") or d.get("metadata", {}).get("filename", "unknown"),
-            status=_safe_status(d.get("status", "pending")),
-            metadata=d.get("metadata", {}),
-            chunk_count=d.get("chunk_count", 0),
-            created_at=datetime.fromisoformat(d.get("created_at") or d["updated_at"]),
-            updated_at=datetime.fromisoformat(d["updated_at"]),
-            error=d.get("error"),
+    documents = []
+    for d in docs_raw:
+        timestamp = d.get("updated_at") or d.get("created_at")
+        if not timestamp:
+            logger.warning(
+                "document %s has neither updated_at nor created_at, excluding from list",
+                d.get("document_id", "<unknown>"),
+            )
+            continue
+        documents.append(
+            DocumentRecord(
+                document_id=d["document_id"],
+                filename=d.get("filename") or d.get("metadata", {}).get("filename", "unknown"),
+                status=_safe_status(d.get("status", "pending")),
+                metadata=d.get("metadata", {}),
+                chunk_count=d.get("chunk_count", 0),
+                created_at=datetime.fromisoformat(d.get("created_at") or timestamp),
+                updated_at=datetime.fromisoformat(timestamp),
+                error=d.get("error"),
+            )
         )
-        for d in docs_raw
-        if "updated_at" in d
-    ]
     return DocumentListResponse(documents=documents, total=total, page=page, limit=limit)
 
 

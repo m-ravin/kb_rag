@@ -1,5 +1,5 @@
 """
-Document identity — derives the same stable, content-addressed document_id
+Document identity — derives the same stable, path-derived document_id
 the Function ingestion pipeline computes.
 
 Deliberately duplicated from azure-functions/document_processor/document_identity.py

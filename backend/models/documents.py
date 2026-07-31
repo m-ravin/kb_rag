@@ -15,6 +15,7 @@ class DocumentStatus(str, Enum):
     SUPERSEDED = "superseded"
     DELETED = "deleted"
     PURGED = "purged"
+    UNKNOWN = "unknown"
 
 
 class DocumentUploadResponse(BaseModel):
