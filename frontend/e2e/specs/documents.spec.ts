@@ -5,7 +5,8 @@
  *   - Document list renders from API
  *   - Status badge shown per document
  *   - Upload requires title before accepting a file
- *   - File upload triggers API call and refreshes list
+ *   - Selecting a file stages it without uploading (explicit Upload button required)
+ *   - Upload button click triggers the API call and refreshes list
  *   - Delete button triggers confirmation dialog then removes row
  */
 
@@ -76,6 +77,41 @@ authTest.describe("Document upload", () => {
     await expect(docs.dropzone).toBeVisible();
   });
 
+  authTest("selecting a file stages it but does not upload until the Upload button is clicked", async ({ authenticatedPage: page }) => {
+    let uploadCalled = false;
+    await page.route("**/manage/documents/upload", (route) => {
+      uploadCalled = true;
+      route.fulfill({
+        json: { document_id: "doc-new", filename: "test.pdf", status: "pending", message: "Upload successful." },
+      });
+    });
+
+    const docs = new DocumentsPage(page);
+    await docs.goto();
+    await docs.titleInput.fill("Test Document");
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await docs.dropzone.click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles({
+      name: "test.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("PDF test content"),
+    });
+
+    // File is staged for review — the dropzone is replaced by a preview, and the
+    // upload dropzone itself no longer accepts input.
+    await expect(docs.stagedFile).toBeVisible();
+    await expect(docs.stagedFile).toContainText("test.pdf");
+    expect(uploadCalled).toBe(false);
+
+    // Removing the staged file clears it without ever calling the API.
+    await docs.removeStagedFileButton.click();
+    await expect(docs.stagedFile).not.toBeVisible();
+    await expect(docs.dropzone).toBeVisible();
+    expect(uploadCalled).toBe(false);
+  });
+
   authTest("uploading a PDF file calls the upload API and refreshes the list", async ({ authenticatedPage: page }) => {
     // Intercept upload and return the mock success response
     let uploadCalled = false;
@@ -94,23 +130,20 @@ authTest.describe("Document upload", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
     await docs.titleInput.fill("Test Document");
-
-    // Trigger the file chooser via dropzone click
-    const fileChooserPromise = page.waitForEvent("filechooser");
-    await docs.dropzone.click();
-    const fileChooser = await fileChooserPromise;
-
-    // Start waiting for the upload response BEFORE triggering the file selection
-    const uploadResponsePromise = page.waitForResponse(
-      (res) => res.url().includes("documents/upload"),
-      { timeout: 10_000 }
-    );
-
-    await fileChooser.setFiles({
+    await docs.selectFile({
       name: "test.pdf",
       mimeType: "application/pdf",
       buffer: Buffer.from("PDF test content"),
     });
+
+    await expect(docs.uploadButton).toBeEnabled();
+
+    // Start waiting for the upload response BEFORE clicking Upload
+    const uploadResponsePromise = page.waitForResponse(
+      (res) => res.url().includes("documents/upload"),
+      { timeout: 10_000 }
+    );
+    await docs.uploadButton.click();
 
     // Wait for the upload API call to complete before asserting
     await uploadResponsePromise;
@@ -130,24 +163,41 @@ authTest.describe("Document upload", () => {
     const docs = new DocumentsPage(page);
     await docs.goto();
     await docs.titleInput.fill("Ibuprofen PIL");
-
-    const fileChooserPromise = page.waitForEvent("filechooser");
-    await docs.dropzone.click();
-    const fileChooser = await fileChooserPromise;
-
-    const uploadResponsePromise = page.waitForResponse(
-      (res) => res.url().includes("documents/upload"),
-      { timeout: 10_000 }
-    );
-
-    await fileChooser.setFiles({
+    await docs.selectFile({
       name: "ibuprofen.docx",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       buffer: Buffer.from("DOCX test content"),
     });
 
+    const uploadResponsePromise = page.waitForResponse(
+      (res) => res.url().includes("documents/upload"),
+      { timeout: 10_000 }
+    );
+    await docs.uploadButton.click();
+
     await uploadResponsePromise;
     expect(uploadCalled).toBe(true);
+  });
+
+  authTest("Upload button is disabled until both a title and a file are provided", async ({ authenticatedPage: page }) => {
+    const docs = new DocumentsPage(page);
+    await docs.goto();
+
+    await expect(docs.uploadButton).toBeDisabled();
+
+    await docs.titleInput.fill("Test Document");
+    await expect(docs.uploadButton).toBeDisabled(); // file still missing
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await docs.dropzone.click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles({
+      name: "test.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("PDF test content"),
+    });
+
+    await expect(docs.uploadButton).toBeEnabled();
   });
 });
 
