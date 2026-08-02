@@ -13,3 +13,8 @@ pymupdf==1.24.5
 python-docx==1.1.2
 python-pptx==0.6.23
 gremlinpython==3.7.1
+# gremlinpython's default websocket transport requires aiohttp — without it,
+# client construction fails immediately with "Please install AIOHTTP or pass
+# custom transport factory". Not a transitive dependency of gremlinpython
+# itself, so it must be listed explicitly.
+aiohttp==3.9.5

@@ -7,6 +7,7 @@
  *   - Ask button disabled when question is empty
  *   - PII badge shown when response.flagged_pii is true
  *   - Error message shown when API fails
+ *   - Markdown answer text renders as structured HTML, not raw syntax
  */
 
 import { test, expect } from "@playwright/test";
@@ -166,6 +167,86 @@ authTest.describe("Q&A Console — content flags", () => {
 
     await expect(qa.piiBadge).toBeVisible();
     await expect(qa.unsafeBadge).toBeVisible();
+  });
+});
+
+authTest.describe("Q&A Console — answer formatting", () => {
+  authTest("bold text and headings render as real HTML, not raw markdown syntax", async ({ authenticatedPage: page }) => {
+    await page.route("**/qa/ask", (route) =>
+      route.fulfill({
+        json: {
+          session_id: "s-md-1",
+          question: "provide a best receipe for making a cake",
+          answer:
+            "I don't have enough information to answer this question directly.\n\n" +
+            "**Closest match based on available information:**\n" +
+            "The knowledge base contains a recipe for **Brownie in a Mug**, a related baked dessert.",
+          question_type: "procedural",
+          sources: [
+            {
+              chunk_id: "doc-003_chunk_0",
+              document_id: "doc-003",
+              filename: "Cooking-Made-Easy.pdf",
+              content: "Brownie in a mug: combine flour, cocoa, sugar...",
+              score: 0.0331,
+            },
+          ],
+          language: "en",
+          tokens_used: 210,
+          latency_ms: 300,
+          flagged_pii: false,
+          flagged_unsafe: false,
+          created_at: new Date().toISOString(),
+        },
+      })
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.ask("provide a best receipe for making a cake");
+
+    // The rendered answer must not contain literal markdown syntax...
+    const rawText = await qa.getAnswerText();
+    expect(rawText).not.toContain("**");
+
+    // ...and the bold heading must be a real <strong> element.
+    const heading = qa.answerText.locator("strong", { hasText: "Closest match based on available information:" });
+    await expect(heading).toBeVisible();
+  });
+
+  authTest("bulleted answer content renders as a real list, not dash-prefixed text", async ({ authenticatedPage: page }) => {
+    await page.route("**/qa/ask", (route) =>
+      route.fulfill({
+        json: {
+          session_id: "s-md-2",
+          question: "How do I prepare the brownie in a mug?",
+          answer:
+            "**Closest match based on available information:**\n" +
+            "- Combine flour, cocoa powder, sugar\n" +
+            "- Add milk and oil, mix well\n" +
+            "- Microwave for 90 seconds",
+          question_type: "procedural",
+          sources: [],
+          language: "en",
+          tokens_used: 180,
+          latency_ms: 250,
+          flagged_pii: false,
+          flagged_unsafe: false,
+          created_at: new Date().toISOString(),
+        },
+      })
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.ask("How do I prepare the brownie in a mug?");
+
+    const rawText = await qa.getAnswerText();
+    expect(rawText).not.toContain("- Combine flour");
+
+    const listItems = qa.answerText.locator("li");
+    await expect(listItems).toHaveCount(3);
+    await expect(listItems.first()).toContainText("Combine flour, cocoa powder, sugar");
   });
 });
 
