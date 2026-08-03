@@ -1,7 +1,18 @@
 import { useState } from "react";
+import axios from "axios";
 import ReactMarkdown from "react-markdown";
 import { askQuestion, AskResponse } from "../api/client";
 import { Send, Loader, AlertTriangle } from "lucide-react";
+
+function getErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (!error.response) return "Could not reach the server. Check your connection and try again.";
+    return `Request failed (${error.response.status}). Please try again.`;
+  }
+  return "Something went wrong. Please try again.";
+}
 
 export default function QATest() {
   const [question, setQuestion] = useState("");
@@ -19,8 +30,8 @@ export default function QATest() {
     try {
       const res = await askQuestion(question.trim(), language);
       setResponse(res.data);
-    } catch {
-      setError("Request failed. Check your connection or try again.");
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
