@@ -251,7 +251,7 @@ authTest.describe("Q&A Console — answer formatting", () => {
 });
 
 test.describe("Q&A Console — error handling", () => {
-  test("shows error message when API returns 500", async ({ page }) => {
+  test("shows the backend's actual error detail when API returns 500", async ({ page }) => {
     await mockBackend(page);
     await page.route("**/qa/ask", (route) =>
       route.fulfill({ status: 500, json: { detail: "Internal error" } })
@@ -267,7 +267,52 @@ test.describe("Q&A Console — error handling", () => {
     await qa.questionInput.fill("What are the side effects?");
     await qa.askButton.click();
 
-    await expect(page.locator('[data-testid="qa-error"]')).toBeVisible({ timeout: 10_000 });
+    const errorEl = page.locator('[data-testid="qa-error"]');
+    await expect(errorEl).toBeVisible({ timeout: 10_000 });
+    await expect(errorEl).toContainText("Internal error");
     await page.screenshot({ path: "artifacts/qa-error.png" });
+  });
+
+  test("shows the dependency's detail message on a 503 (e.g. PII service cold start)", async ({ page }) => {
+    await mockBackend(page);
+    await page.route("**/qa/ask", (route) =>
+      route.fulfill({
+        status: 503,
+        json: { detail: "PII screening service temporarily unavailable. Please try again shortly." },
+      })
+    );
+
+    await page.goto("/login");
+    await page.evaluate(() =>
+      localStorage.setItem("access_token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwicmxlIjoiYWRtaW4ifQ.mock")
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.questionInput.fill("What are the side effects?");
+    await qa.askButton.click();
+
+    const errorEl = page.locator('[data-testid="qa-error"]');
+    await expect(errorEl).toBeVisible({ timeout: 10_000 });
+    await expect(errorEl).toContainText("PII screening service temporarily unavailable");
+  });
+
+  test("shows a connection-specific message when the request never reaches the server", async ({ page }) => {
+    await mockBackend(page);
+    await page.route("**/qa/ask", (route) => route.abort("connectionfailed"));
+
+    await page.goto("/login");
+    await page.evaluate(() =>
+      localStorage.setItem("access_token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwicmxlIjoiYWRtaW4ifQ.mock")
+    );
+
+    const qa = new QAConsolePage(page);
+    await qa.goto();
+    await qa.questionInput.fill("What are the side effects?");
+    await qa.askButton.click();
+
+    const errorEl = page.locator('[data-testid="qa-error"]');
+    await expect(errorEl).toBeVisible({ timeout: 10_000 });
+    await expect(errorEl).toContainText("Could not reach the server");
   });
 });
