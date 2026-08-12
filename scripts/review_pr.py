@@ -1,15 +1,15 @@
 """
-Claude Code PR Reviewer
-=======================
+OpenAI PR Reviewer
+==================
 Called by .github/workflows/pr-review.yml after test, lint, and security jobs.
 
 Decision matrix:
-  BLOCK (REQUEST_CHANGES, no Claude call):
+  BLOCK (REQUEST_CHANGES, no OpenAI call):
     - tests failed
     - bandit HIGH severity issues found
-  Claude decides (APPROVE / REQUEST_CHANGES / COMMENT):
-    - all gates pass → Claude reviews code quality
-    - lint/checkov issues → included as context for Claude
+  OpenAI decides (APPROVE / REQUEST_CHANGES / COMMENT):
+    - all hard gates pass: review code quality
+    - lint/checkov issues: include them as review context
 """
 
 import json
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import textwrap
 
-import anthropic
+from openai import APIStatusError, AuthenticationError, OpenAI, OpenAIError, RateLimitError
 
 _SKIP_PATTERNS = [
     ":(exclude)uv.lock",
@@ -31,9 +31,8 @@ _SKIP_PATTERNS = [
     ":(exclude)data/**",
 ]
 _MAX_DIFF_CHARS = 80_000
+_DEFAULT_MODEL = "gpt-5-mini"
 
-
-# ── Gate helpers ──────────────────────────────────────────────────────────────
 
 def _env_bool(key: str) -> bool:
     return os.environ.get(key, "false").lower() == "true"
@@ -41,24 +40,29 @@ def _env_bool(key: str) -> bool:
 
 def _read_artifact(path: str, max_chars: int = 4000) -> str:
     """
-    Reads a file written by an upstream job, returns '' if missing.
-    Handles the case where checkov writes a *directory* named checkov_output.json
-    (happens with multi-framework scans) by concatenating files found inside it.
+    Read an upstream CI artifact, returning an empty string if it is unavailable.
+
+    Example:
+        >>> _read_artifact("missing.txt")
+        ''
     """
     try:
         if os.path.isdir(path):
-            # checkov multi-framework output: directory with one JSON per framework
             import glob
+
             parts = []
-            for f in sorted(glob.glob(os.path.join(path, "**", "*.json"), recursive=True)):
+            for artifact_path in sorted(
+                glob.glob(os.path.join(path, "**", "*.json"), recursive=True)
+            ):
                 try:
-                    parts.append(open(f).read(max_chars))
+                    with open(artifact_path, encoding="utf-8") as artifact:
+                        parts.append(artifact.read(max_chars))
                 except OSError:
                     pass
             content = "\n".join(parts)
         else:
-            with open(path) as f:
-                content = f.read()
+            with open(path, encoding="utf-8") as artifact:
+                content = artifact.read()
         return content[:max_chars] + (" [truncated]" if len(content) > max_chars else "")
     except (FileNotFoundError, OSError):
         return ""
@@ -66,33 +70,36 @@ def _read_artifact(path: str, max_chars: int = 4000) -> str:
 
 def build_gate_summary() -> tuple[bool, str]:
     """
-    Returns (hard_block, summary_markdown).
-    hard_block=True means we post REQUEST_CHANGES immediately without calling Claude.
+    Return whether hard CI gates failed and a Markdown summary for the PR review.
+
+    Example:
+        >>> isinstance(build_gate_summary()[0], bool)
+        True
     """
-    tests_passed    = _env_bool("TESTS_PASSED")
-    lint_passed     = _env_bool("LINT_PASSED")
+    tests_passed = _env_bool("TESTS_PASSED")
+    lint_passed = _env_bool("LINT_PASSED")
     security_passed = _env_bool("SECURITY_PASSED")
-    coverage_pct    = os.environ.get("COVERAGE_PCT", "N/A")
-    failed_tests    = os.environ.get("FAILED_TESTS", "0")
-    lint_summary    = os.environ.get("LINT_SUMMARY", "")
-    bandit_summary  = os.environ.get("BANDIT_SUMMARY", "")
+    coverage_pct = os.environ.get("COVERAGE_PCT", "N/A")
+    failed_tests = os.environ.get("FAILED_TESTS", "0")
+    lint_summary = os.environ.get("LINT_SUMMARY", "")
+    bandit_summary = os.environ.get("BANDIT_SUMMARY", "")
     checkov_summary = os.environ.get("CHECKOV_SUMMARY", "")
 
     lines = ["## CI Gate Results\n"]
+    lines.append(
+        f"| {'PASS' if tests_passed else 'FAIL'} Tests | "
+        f"{'' if tests_passed else f'{failed_tests} test(s) FAILED'} | "
+        f"Coverage: {coverage_pct}% |"
+    )
+    lines.append(
+        f"| {'PASS' if lint_passed else 'WARN'} Lint | "
+        f"{lint_summary or ('clean' if lint_passed else 'issues found')} |"
+    )
+    lines.append(
+        f"| {'PASS' if security_passed else 'WARN'} Security | "
+        f"bandit: {bandit_summary} | checkov: {checkov_summary} |"
+    )
 
-    # Tests
-    icon = "✅" if tests_passed else "❌"
-    lines.append(f"| {icon} Tests | {'' if tests_passed else f'{failed_tests} test(s) FAILED'} | Coverage: {coverage_pct}% |")
-
-    # Lint
-    icon = "✅" if lint_passed else "⚠️"
-    lines.append(f"| {icon} Lint  | {lint_summary or ('clean' if lint_passed else 'issues found')} |")
-
-    # Security
-    icon = "✅" if security_passed else "🚨"
-    lines.append(f"| {icon} Security | bandit: {bandit_summary} | checkov: {checkov_summary} |")
-
-    # Hard block: fail tests or bandit HIGH security issues
     hard_block = not tests_passed or (not security_passed and "HIGH" in bandit_summary)
     if hard_block:
         reasons = []
@@ -101,21 +108,26 @@ def build_gate_summary() -> tuple[bool, str]:
         if not security_passed and "HIGH" in bandit_summary:
             reasons.append(f"bandit found HIGH severity security issues: {bandit_summary}")
         lines.append(
-            f"\n> 🚫 **Auto-blocked**: {'; '.join(reasons)}. "
-            "Fix these before this PR can be approved."
+            f"\n> **Auto-blocked**: {'; '.join(reasons)}. Fix these before this PR can be approved."
         )
 
     return hard_block, "\n".join(lines)
 
 
-# ── Diff ──────────────────────────────────────────────────────────────────────
-
 def get_diff() -> str:
+    """
+    Return the PR diff, excluding generated and binary-heavy files.
+
+    Example:
+        get_diff()
+    """
     base = os.environ["BASE_SHA"]
     head = os.environ["HEAD_SHA"]
     result = subprocess.run(
         ["git", "diff", base, head, "--"] + _SKIP_PATTERNS,
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     diff = result.stdout
     if len(diff) > _MAX_DIFF_CHARS:
@@ -123,43 +135,49 @@ def get_diff() -> str:
     return diff
 
 
-# ── Claude prompt ─────────────────────────────────────────────────────────────
-
 def build_prompt(diff: str, gate_summary: str) -> str:
-    pytest_output  = _read_artifact("pytest_output.txt")
-    ruff_output    = _read_artifact("ruff_output.txt")
-    bandit_raw     = _read_artifact("bandit_output.json")
-    checkov_raw    = _read_artifact("checkov_output.json")
+    """
+    Build the code-review prompt sent to OpenAI.
 
-    # Parse bandit JSON for readable findings
+    Example:
+        >>> "## Diff" in build_prompt("diff --git a/x b/x", "gates")
+        True
+    """
+    pytest_output = _read_artifact("pytest_output.txt")
+    ruff_output = _read_artifact("ruff_output.txt")
+    bandit_raw = _read_artifact("bandit_output.json")
+    checkov_raw = _read_artifact("checkov_output.json")
+
     bandit_findings = ""
     try:
         bandit_data = json.loads(bandit_raw)
         issues = bandit_data.get("results", [])
         if issues:
             bandit_findings = "\n".join(
-                f"- [{r['issue_severity']}] {r['issue_text']} "
-                f"({r['filename']}:{r['line_number']})"
-                for r in issues[:20]
+                f"- [{result['issue_severity']}] {result['issue_text']} "
+                f"({result['filename']}:{result['line_number']})"
+                for result in issues[:20]
             )
     except (json.JSONDecodeError, KeyError):
         bandit_findings = bandit_raw[:1000] if bandit_raw else ""
 
-    return textwrap.dedent(f"""\
-        You are a senior code reviewer for **KB RAG** — an Azure-hosted RAG system
-        built with FastAPI, Azure OpenAI, Azure AI Search, Cosmos DB (MongoDB + Gremlin),
-        Redis, Azure Functions, AKS, and Terraform.
+    return textwrap.dedent(
+        f"""\
+        You are a senior code reviewer for KB RAG, an Azure-hosted RAG system
+        built with FastAPI, Azure OpenAI, Azure AI Search, Cosmos DB, Redis,
+        Azure Functions, Azure Container Apps, and Terraform.
 
         ## PR Details
         Title: {os.environ.get("PR_TITLE", "")}
         Description: {os.environ.get("PR_BODY", "No description")}
         Changed files: {os.environ.get("CHANGED_FILES")} | +{os.environ.get("ADDITIONS")} / -{os.environ.get("DELETIONS")}
 
-        ## Automated Check Results (already run by CI — do not re-check these)
+        ## Automated Check Results
+        CI already ran these checks. Do not re-check them; use them as context.
 
         {gate_summary}
 
-        ### pytest output (last 50 lines)
+        ### pytest output
         ```
         {pytest_output[-3000:] if pytest_output else "No output captured"}
         ```
@@ -174,148 +192,175 @@ def build_prompt(diff: str, gate_summary: str) -> str:
         {bandit_findings or "No issues"}
         ```
 
+        ### checkov output
+        ```
+        {checkov_raw[-2000:] if checkov_raw else "No issues"}
+        ```
+
         ## Diff
         ```diff
         {diff}
         ```
 
-        ## Your review focus (CI already caught tests/lint/security above)
-
-        Review the diff for things CI cannot catch:
-
-        ### Logic & Correctness
-        - Business logic errors, off-by-one, wrong conditions
+        ## Your review focus
+        Review the diff for issues CI cannot catch:
+        - Logic errors, incorrect conditions, data loss, and edge cases
         - Race conditions in async code
-        - Incorrect Pydantic model validation (missing fields, wrong types)
+        - Incorrect Pydantic validation
+        - PII reaching Azure OpenAI or logs without masking
+        - Secrets exposed in Terraform, Container Apps configuration, or GitHub Actions
+        - Missing authorization on management endpoints
+        - Azure resource changes that could destroy stateful infrastructure
+        - Missing error handling around Azure SDK calls
+        - Maintainability problems that create real risk
 
-        ### Security gaps CI missed
-        - PII data reaching Azure OpenAI or MongoDB logs without masking
-          (check that `mask_pii()` is called before any LLM or log call)
-        - Secrets interpolated directly in Kubernetes manifests or Terraform locals
-        - Missing `Depends(require_role(...))` on new management endpoints
-
-        ### Azure / Cloud correctness
-        - Terraform resources that would be destroyed on rename (missing lifecycle)
-        - Missing `prevent_destroy` on stateful Azure resources
-        - AKS pods with hardcoded env vars instead of `secretRef`
-
-        ### Maintainability
-        - Functions > 50 lines without clear extraction opportunity
-        - Missing error handling on Azure SDK calls
-        - `print()` instead of `logging`
-
-        ## Output format (keep headers verbatim)
+        ## Output format
+        Keep these headers verbatim.
 
         ## Summary
         [1-2 sentences]
 
         ## Findings
 
-        ### 🔴 CRITICAL
+        ### CRITICAL
         [findings or "None"]
 
-        ### 🟠 HIGH
+        ### HIGH
         [findings or "None"]
 
-        ### 🟡 MEDIUM
+        ### MEDIUM
         [findings or "None"]
 
-        ### 🟢 LOW / Suggestions
+        ### LOW / Suggestions
         [findings or "None"]
 
         ## Decision
-        **[APPROVE / REQUEST_CHANGES / COMMENT]** — [one sentence reason]
+        **[APPROVE / REQUEST_CHANGES / COMMENT]** - [one sentence reason]
 
         Decision rules:
-        - APPROVE: zero CRITICAL and zero HIGH findings (note: if CI gates above already
-          block this PR, your decision is overridden — focus on code quality only)
+        - APPROVE: zero CRITICAL and zero HIGH findings
         - REQUEST_CHANGES: any CRITICAL finding, or 2+ HIGH findings
         - COMMENT: exactly 1 HIGH finding, or only MEDIUM/LOW
-    """)
-
-
-# ── Post review ───────────────────────────────────────────────────────────────
-
-def post_review(body: str, decision: str) -> None:
-    pr  = os.environ["PR_NUMBER"]
-    repo = os.environ["REPO"]
-
-    full_body = (
-        "## 🤖 Claude Code Review\n\n"
-        + body
-        + "\n\n---\n*Reviewed by [Claude claude-sonnet-4-6](https://anthropic.com) "
-        "via GitHub Actions · [workflow](.github/workflows/pr-review.yml)*"
+        """
     )
 
-    flag = f"--{decision}"
+
+def post_review(body: str, decision: str) -> None:
+    """
+    Post a GitHub PR review, falling back to a comment if review creation fails.
+
+    Example:
+        post_review("Looks good", "comment")
+    """
+    pr_number = os.environ["PR_NUMBER"]
+    repo = os.environ["REPO"]
+    model = os.environ.get("OPENAI_REVIEW_MODEL", _DEFAULT_MODEL)
+
+    full_body = (
+        "## OpenAI Code Review\n\n" + body + "\n\n---\n"
+        f"*Reviewed by OpenAI `{model}` via GitHub Actions - "
+        "[workflow](.github/workflows/pr-review.yml)*"
+    )
+
     result = subprocess.run(
-        ["gh", "pr", "review", pr, "--repo", repo, flag, "--body", full_body],
-        capture_output=True, text=True,
+        ["gh", "pr", "review", pr_number, "--repo", repo, f"--{decision}", "--body", full_body],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"gh pr review failed ({result.stderr}), falling back to comment", file=sys.stderr)
         subprocess.run(
-            ["gh", "pr", "comment", pr, "--repo", repo, "--body", full_body],
+            ["gh", "pr", "comment", pr_number, "--repo", repo, "--body", full_body],
             check=True,
         )
     else:
-        print(f"✅ Review posted as {decision.upper()} on PR #{pr}")
+        print(f"Review posted as {decision.upper()} on PR #{pr_number}")
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+def run_openai_review(prompt: str) -> str:
+    """
+    Ask OpenAI for a code review and return the generated Markdown.
+
+    Example:
+        run_openai_review("Review this diff")
+    """
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = os.environ.get("OPENAI_REVIEW_MODEL", _DEFAULT_MODEL)
+
+    response = client.responses.create(
+        model=model,
+        input=prompt,
+        max_output_tokens=4096,
+    )
+    return response.output_text
+
+
+def _build_skipped_notice(gate_summary: str, reason: str) -> str:
+    return (
+        gate_summary + f"\n\n> **OpenAI Code Review skipped** - {reason}. "
+        "The CI hard gates passed, so this automation is approving to avoid blocking the PR "
+        "on reviewer configuration."
+    )
+
 
 def main() -> None:
     hard_block, gate_summary = build_gate_summary()
-
     print(f"Gate summary:\n{gate_summary}\n")
 
     if hard_block:
-        # Tests failed or bandit HIGH — block without calling Claude API
-        print("Hard block triggered — posting REQUEST_CHANGES without Claude call")
+        print("Hard block triggered - posting REQUEST_CHANGES without OpenAI call")
         post_review(gate_summary, "request-changes")
         return
 
-    print("All hard gates passed — calling Claude for code quality review...")
+    print("All hard gates passed - calling OpenAI for code quality review...")
     diff = get_diff()
     if not diff.strip():
-        print("Empty diff — nothing to review")
+        print("Empty diff - nothing to review")
         return
 
     print(f"Diff: {len(diff):,} chars")
     prompt = build_prompt(diff, gate_summary)
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+        review_text = run_openai_review(prompt)
+    except AuthenticationError as exc:
+        post_review(
+            _build_skipped_notice(gate_summary, f"invalid `OPENAI_API_KEY` secret: `{exc}`"),
+            "approve",
         )
-        review_text = message.content[0].text
-    except anthropic.BadRequestError as exc:
-        if "credit balance is too low" in str(exc):
-            notice = (
-                gate_summary
-                + "\n\n> ⚠️ **Claude AI Review skipped** — Anthropic account has insufficient credits. "
-                "Add credits at [console.anthropic.com](https://console.anthropic.com) → Plans & Billing."
+        print(f"Skipped OpenAI review - auth error: {exc}")
+        return
+    except RateLimitError as exc:
+        post_review(
+            _build_skipped_notice(gate_summary, f"OpenAI quota or rate limit issue: `{exc}`"),
+            "approve",
+        )
+        print(f"Skipped OpenAI review - rate limit/quota error: {exc}")
+        return
+    except APIStatusError as exc:
+        if exc.status_code in {400, 404} and "model" in str(exc).lower():
+            reason = (
+                "model configuration failed. Set `OPENAI_REVIEW_MODEL` to a model "
+                f"available to this OpenAI project. Error: `{exc}`"
             )
-            # All CI gates passed — approve so the PR is not blocked by missing credits
-            post_review(notice, "approve")
-            print(f"Skipped Claude review — no credits: {exc}")
+            post_review(_build_skipped_notice(gate_summary, reason), "approve")
+            print(f"Skipped OpenAI review - model error: {exc}")
             return
         raise
-    except anthropic.AuthenticationError as exc:
-        notice = (
-            gate_summary
-            + "\n\n> ⚠️ **Claude AI Review skipped** — Invalid `ANTHROPIC_API_KEY` secret. "
-            f"Error: `{exc}`"
+    except OpenAIError as exc:
+        # Catches everything the SDK can raise that isn't one of the specific
+        # cases above - most notably a missing/empty `OPENAI_API_KEY` secret,
+        # which raises this at client construction (before any HTTP request),
+        # plus transient connection/timeout errors. Without this handler those
+        # cases crash the whole CI job with an uncaught traceback instead of
+        # degrading gracefully like every other failure mode here.
+        post_review(
+            _build_skipped_notice(gate_summary, f"OpenAI client error: `{exc}`"),
+            "approve",
         )
-        # All CI gates passed — approve so the PR is not blocked by a misconfigured key
-        post_review(notice, "approve")
-        print(f"Skipped Claude review — auth error: {exc}")
+        print(f"Skipped OpenAI review - client error: {exc}")
         return
 
-    # Parse decision from Claude's response
     decision = "comment"
     for line in review_text.splitlines():
         stripped = line.strip()

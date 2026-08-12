@@ -169,10 +169,10 @@ kb_rag/
 │
 ├── scripts/
 │   ├── setup.sh                     # One-time local setup
-│   └── review_pr.py                 # Claude AI PR review script
+│   └── review_pr.py                 # OpenAI PR review script
 │
 ├── .github/workflows/
-│   ├── pr-review.yml                # Tests + lint + security + Claude AI review
+│   ├── pr-review.yml                # Tests + lint + security + OpenAI review
 │   ├── deploy.yml                   # Docker build → ACR → Container Apps rolling deploy
 │   ├── terraform.yml                # Terraform plan/apply + GitHub secret sync
 │   └── e2e.yml                      # Playwright E2E tests on every PR
@@ -365,7 +365,7 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
-| `pr-review.yml` | Every PR | Tests + Coverage, Linting, Security Scan, Claude AI Review |
+| `pr-review.yml` | Every PR | Tests + Coverage, Linting, Security Scan, OpenAI Code Review |
 | `e2e.yml` | Every PR | Playwright E2E (38 tests, Chromium + Firefox + Mobile) |
 | `terraform.yml` | PR on `infrastructure/**` or manual dispatch | Terraform plan / apply / destroy |
 | `deploy.yml` | Manual `workflow_dispatch` | Docker build → ACR, set Container App secrets from Key Vault, update backend/frontend/presidio Container Apps to the new image |
@@ -376,11 +376,13 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 |--------|--------|
 | `AZURE_CREDENTIALS` | `az ad sp create-for-rbac --sdk-auth` |
 | `ARM_CLIENT_ID` / `ARM_CLIENT_SECRET` / `ARM_SUBSCRIPTION_ID` / `ARM_TENANT_ID` | Service principal |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API Keys |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) -> API Keys |
 | `ACR_LOGIN_SERVER` / `ACR_USERNAME` / `ACR_PASSWORD` | Auto-set by `terraform.yml` after apply |
 | `ACA_RESOURCE_GROUP` / `ACA_IDENTITY_ID` / `KEY_VAULT_URI` | Auto-set by `terraform.yml` after apply |
 | `ACA_BACKEND_APP_NAME` / `ACA_FRONTEND_APP_NAME` / `ACA_PRESIDIO_APP_NAME` | Auto-set by `terraform.yml` after apply |
 | `GH_PAT` | GitHub PAT with `repo` scope |
+
+Also configurable — a repo **variable**, not a secret: `OPENAI_REVIEW_MODEL` (optional, defaults to `gpt-5-mini`) overrides which OpenAI model `pr-review.yml` uses for code review.
 
 ---
 

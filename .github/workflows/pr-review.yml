@@ -1,4 +1,4 @@
-name: Claude Code PR Review
+name: OpenAI Code PR Review
 
 on:
   pull_request:
@@ -230,11 +230,11 @@ jobs:
             pip_audit_output.json
           retention-days: 3
 
-  # ── Job 4: Claude AI Review ───────────────────────────────────────────────────
+  # ── Job 4: OpenAI Code Review ─────────────────────────────────────────────────
   # Runs after all checks — even if they fail — so the review always posts
   # and surfaces all findings in one place.
   review:
-    name: Claude AI Review
+    name: OpenAI Code Review
     runs-on: ubuntu-latest
     needs: [test, lint, security]
     if: always() && !cancelled() && github.event.pull_request.draft == false
@@ -249,17 +249,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Anthropic SDK
-        run: pip install anthropic==0.40.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --dev --no-install-project
 
       - name: Download all check artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: Run Claude PR Review
+      - name: Run OpenAI PR Review
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_REVIEW_MODEL: ${{ vars.OPENAI_REVIEW_MODEL || 'gpt-5-mini' }}
           GH_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER:         ${{ github.event.pull_request.number }}
           REPO:              ${{ github.repository }}
@@ -279,4 +285,4 @@ jobs:
           SECURITY_PASSED:   ${{ needs.security.outputs.result == 'success' }}
           BANDIT_SUMMARY:    ${{ needs.security.outputs.bandit_summary }}
           CHECKOV_SUMMARY:   ${{ needs.security.outputs.checkov_summary }}
-        run: python scripts/review_pr.py
+        run: uv run python scripts/review_pr.py

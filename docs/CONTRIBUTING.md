@@ -390,7 +390,7 @@ Before opening a PR:
 - [ ] PR description explains *why* (not just *what*)
 - [ ] ADR created if an architectural decision was made (`docs/adr/`)
 
-CI automatically runs: tests, lint, security scan (bandit + checkov), and Claude AI review on every PR.
+CI automatically runs: tests, lint, security scan (bandit + checkov), and OpenAI code review on every PR.
 
 ## Adding a New API Endpoint
 
