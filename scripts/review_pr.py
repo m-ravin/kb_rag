@@ -18,7 +18,7 @@ import subprocess
 import sys
 import textwrap
 
-from openai import APIStatusError, AuthenticationError, OpenAI, RateLimitError
+from openai import APIStatusError, AuthenticationError, OpenAI, OpenAIError, RateLimitError
 
 _SKIP_PATTERNS = [
     ":(exclude)uv.lock",
@@ -165,7 +165,7 @@ def build_prompt(diff: str, gate_summary: str) -> str:
         f"""\
         You are a senior code reviewer for KB RAG, an Azure-hosted RAG system
         built with FastAPI, Azure OpenAI, Azure AI Search, Cosmos DB, Redis,
-        Azure Functions, AKS, and Terraform.
+        Azure Functions, Azure Container Apps, and Terraform.
 
         ## PR Details
         Title: {os.environ.get("PR_TITLE", "")}
@@ -208,7 +208,7 @@ def build_prompt(diff: str, gate_summary: str) -> str:
         - Race conditions in async code
         - Incorrect Pydantic validation
         - PII reaching Azure OpenAI or logs without masking
-        - Secrets exposed in Terraform, Kubernetes, or GitHub Actions
+        - Secrets exposed in Terraform, Container Apps configuration, or GitHub Actions
         - Missing authorization on management endpoints
         - Azure resource changes that could destroy stateful infrastructure
         - Missing error handling around Azure SDK calls
@@ -347,6 +347,19 @@ def main() -> None:
             print(f"Skipped OpenAI review - model error: {exc}")
             return
         raise
+    except OpenAIError as exc:
+        # Catches everything the SDK can raise that isn't one of the specific
+        # cases above - most notably a missing/empty `OPENAI_API_KEY` secret,
+        # which raises this at client construction (before any HTTP request),
+        # plus transient connection/timeout errors. Without this handler those
+        # cases crash the whole CI job with an uncaught traceback instead of
+        # degrading gracefully like every other failure mode here.
+        post_review(
+            _build_skipped_notice(gate_summary, f"OpenAI client error: `{exc}`"),
+            "approve",
+        )
+        print(f"Skipped OpenAI review - client error: {exc}")
+        return
 
     decision = "comment"
     for line in review_text.splitlines():

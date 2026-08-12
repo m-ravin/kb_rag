@@ -377,11 +377,12 @@ Full interactive docs available at `http://localhost:8000/docs` when running.
 | `AZURE_CREDENTIALS` | `az ad sp create-for-rbac --sdk-auth` |
 | `ARM_CLIENT_ID` / `ARM_CLIENT_SECRET` / `ARM_SUBSCRIPTION_ID` / `ARM_TENANT_ID` | Service principal |
 | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) -> API Keys |
-| `OPENAI_REVIEW_MODEL` | Optional GitHub Actions variable; defaults to `gpt-5-mini` |
 | `ACR_LOGIN_SERVER` / `ACR_USERNAME` / `ACR_PASSWORD` | Auto-set by `terraform.yml` after apply |
 | `ACA_RESOURCE_GROUP` / `ACA_IDENTITY_ID` / `KEY_VAULT_URI` | Auto-set by `terraform.yml` after apply |
 | `ACA_BACKEND_APP_NAME` / `ACA_FRONTEND_APP_NAME` / `ACA_PRESIDIO_APP_NAME` | Auto-set by `terraform.yml` after apply |
 | `GH_PAT` | GitHub PAT with `repo` scope |
+
+Also configurable — a repo **variable**, not a secret: `OPENAI_REVIEW_MODEL` (optional, defaults to `gpt-5-mini`) overrides which OpenAI model `pr-review.yml` uses for code review.
 
 ---
 
